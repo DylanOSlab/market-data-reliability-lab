@@ -1,39 +1,68 @@
 from __future__ import annotations
-import csv, io, json, re
+
+import csv
+import io
+import json
+import math
+import re
 from pathlib import Path
+from typing import Any
+
 from .errors import DataContractError
 
-PERIOD = re.compile(r"^M(0[1-9]|1[0-2])$")
 
-def load(path: str | Path) -> dict:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+MONTHLY_PERIOD_PATTERN = re.compile(r"^M(0[1-9]|1[0-2])$")
+BLS_MISSING_VALUES = {".", ""}
 
-def normalize(payload: dict) -> list[dict[str, str]]:
-    if "Results" not in payload or "series" not in payload["Results"]:
-        raise DataContractError("missing Results.series")
-    series = payload["Results"]["series"]
-    if len(series) != 1 or "seriesID" not in series[0] or "data" not in series[0]:
-        raise DataContractError("expected exactly one well-formed series")
-    sid = series[0]["seriesID"]
-    rows, seen = [], set()
-    for item in series[0]["data"]:
-        year, period, value = item.get("year"), item.get("period"), item.get("value")
-        if not isinstance(year, str) or not year.isdigit() or not PERIOD.match(str(period)):
-            raise DataContractError("invalid year or monthly period")
-        try:
-            number = float(value)
-        except (TypeError, ValueError) as exc:
-            raise DataContractError("value is not numeric") from exc
-        date = f"{year}-{period[1:]}-01"
-        key = (sid, date)
-        if key in seen:
-            raise DataContractError("duplicate series/date key")
-        seen.add(key)
-        rows.append({"series_id": sid, "date": date, "value": format(number, "g")})
-    return sorted(rows, key=lambda r: r["date"])
 
-def to_csv(rows: list[dict[str, str]]) -> str:
-    out = io.StringIO(newline="")
-    writer = csv.DictWriter(out, fieldnames=["series_id", "date", "value"], lineterminator="\n")
-    writer.writeheader(); writer.writerows(rows)
-    return out.getvalue()
+def load(path: str | Path) -> dict[str, Any]:
+    """
+    Load a JSON document from disk.
+
+    Parameters
+    ----------
+    path:
+        Path to the JSON fixture or downloaded API response.
+
+    Returns
+    -------
+    dict
+        Parsed JSON document.
+
+    Raises
+    ------
+    DataContractError
+        If the file cannot be read, contains invalid JSON, or the JSON
+        document is not an object.
+    """
+    file_path = Path(path)
+
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DataContractError(
+            f"could not read input file: {file_path}"
+        ) from exc
+
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise DataContractError(
+            f"input file is not valid JSON: {file_path}"
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise DataContractError("JSON root must be an object")
+
+    return payload
+
+
+def normalize(payload: dict[str, Any]) -> list[dict[str, str]]:
+    """
+    Validate and normalize one BLS monthly time series.
+
+    The normalized output contains:
+
+    - ``series_id``
+    - ``date`` as an ISO month-start date
+    - ``value`
