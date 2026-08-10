@@ -1,0 +1,2 @@
+class DataContractError(ValueError):
+    pass

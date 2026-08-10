@@ -1,0 +1,7 @@
+{
+  "source": "U.S. Bureau of Labor Statistics Public Data API v1",
+  "series_id": "LNS11300000",
+  "source_url": "https://api.bls.gov/publicAPI/v1/timeseries/data/LNS11300000",
+  "observation": "2025 M12 = 62.4",
+  "note": "Minimal checked-in example; use scripts/fetch_bls_snapshot.py for a current snapshot. Commit refreshed fixtures only after review."
+}
