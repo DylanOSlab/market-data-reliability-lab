@@ -1,0 +1,11 @@
+{
+  "target_version": "v0.2.0",
+  "phase": "build_cpi",
+  "status": "ready",
+  "attempt": 0,
+  "max_attempts": 3,
+  "active_branch": "automation/v0.2.0-add-cpi",
+  "active_pull_request": null,
+  "last_successful_commit": null,
+  "human_input_required": false
+}
