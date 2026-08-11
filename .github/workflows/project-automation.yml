@@ -1,379 +1,498 @@
-name: project-automation
+name: project-autopilot
 
 on:
   workflow_dispatch:
     inputs:
-      operation:
-        description: Operation to perform
-        required: true
-        type: choice
-        default: health-check
-        options:
-          - health-check
-          - bootstrap-roadmap
-          - create-release
-
-      version:
-        description: Release version, for example v0.2.0
+      force_run:
+        description: Run even if the target release already exists
         required: false
-        type: string
-
-      release_title:
-        description: Optional release title
-        required: false
-        type: string
+        default: false
+        type: boolean
 
   schedule:
-    - cron: "23 2 * * 1"
+    - cron: "7,37 * * * *"
 
 concurrency:
-  group: project-automation
+  group: market-data-reliability-autopilot
   cancel-in-progress: false
 
 permissions:
   contents: read
+  issues: write
+  actions: write
+
+env:
+  TARGET_VERSION: v0.2.0
+  BLOCKER_TITLE: "[autopilot] Human input required"
+  TRANSIENT_TITLE: "[autopilot] Temporary upstream failure"
+  GH_TOKEN: ${{ github.token }}
 
 jobs:
-  health-check:
-    name: Full project health check
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event.inputs.operation == 'health-check'
-
+  autopilot:
+    name: Continuous project autopilot
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Determine whether target is complete
+        id: completion
+        shell: bash
+        run: |
+          set -u
+
+          force_run="${{ inputs.force_run || false }}"
+
+          if gh release view "$TARGET_VERSION" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+
+            if [[ "$force_run" == "true" ]]; then
+              echo "should_continue=true" >> "$GITHUB_OUTPUT"
+              echo "Target release exists, but force_run is enabled."
+            else
+              echo "should_continue=false" >> "$GITHUB_OUTPUT"
+              echo "Target $TARGET_VERSION is complete. Autopilot will stop."
+            fi
+          else
+            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+            echo "should_continue=true" >> "$GITHUB_OUTPUT"
+            echo "Target $TARGET_VERSION is not complete."
+          fi
+
+      - name: Report completed target
+        if: steps.completion.outputs.should_continue == 'false'
+        shell: bash
+        run: |
+          {
+            echo "# Autopilot stopped normally"
+            echo
+            echo "Target release \`$TARGET_VERSION\` already exists."
+            echo
+            echo "No further construction work is required."
+            echo
+            echo "Use the manual force option to run another health check."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Ensure repository labels exist
+        if: steps.completion.outputs.should_continue == 'true'
+        shell: bash
+        run: |
+          set -u
+
+          ensure_label() {
+            local name="$1"
+            local color="$2"
+            local description="$3"
+
+            if gh label list \
+              --repo "$GITHUB_REPOSITORY" \
+              --limit 200 \
+              --json name \
+              --jq '.[].name' |
+              grep -Fxq "$name"; then
+              echo "Label already exists: $name"
+            else
+              gh label create "$name" \
+                --repo "$GITHUB_REPOSITORY" \
+                --color "$color" \
+                --description "$description"
+            fi
+          }
+
+          ensure_label "autopilot" "1D76DB" \
+            "Created or managed by project automation"
+
+          ensure_label "human-input-required" "D73A4A" \
+            "Automation stopped because human input is required"
+
+          ensure_label "transient-upstream" "FBCA04" \
+            "Temporary external service or network failure"
+
+          ensure_label "roadmap" "0E8A16" \
+            "Planned project development"
+
+          ensure_label "testing" "5319E7" \
+            "Automated or regression testing"
+
+      - name: Bootstrap roadmap idempotently
+        if: steps.completion.outputs.should_continue == 'true'
+        shell: bash
+        run: |
+          set -u
+
+          create_issue_if_absent() {
+            local title="$1"
+            local body="$2"
+            local labels="$3"
+
+            existing="$(
+              gh issue list \
+                --repo "$GITHUB_REPOSITORY" \
+                --state all \
+                --limit 200 \
+                --json title \
+                --jq '.[].title'
+            )"
+
+            if echo "$existing" | grep -Fxq "$title"; then
+              echo "Roadmap issue already exists: $title"
+            else
+              gh issue create \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "$title" \
+                --body "$body" \
+                --label "$labels"
+            fi
+          }
+
+          create_issue_if_absent \
+            "Add BLS CPI series CUUR0000SA0" \
+            "## Goal
+
+          Add CUUR0000SA0 as the second official BLS benchmark series.
+
+          ## Completion criteria
+
+          - Immutable official raw fixture
+          - Provenance record
+          - Canonical golden CSV
+          - Deterministic fault cases
+          - Automated regression tests
+          - Live upstream validation" \
+            "autopilot,roadmap"
+
+          create_issue_if_absent \
+            "Preserve regression coverage for BLS missing markers" \
+            "## Goal
+
+          Permanently test real BLS missing-value markers.
+
+          ## Required cases
+
+          - A period with value \`.\`
+          - A period with value \`-\`
+          - Unknown non-numeric values remain rejected" \
+            "autopilot,testing"
+
+          create_issue_if_absent \
+            "Prepare Market Data Reliability Lab v0.2.0" \
+            "## Goal
+
+          Track the finite completion criteria for v0.2.0.
+
+          ## Completion criteria
+
+          - CPI dataset added
+          - All regression tests pass
+          - Live BLS validation passes
+          - CI passes on all supported Python versions
+          - v0.2.0 GitHub Release exists" \
+            "autopilot,roadmap"
+
       - name: Set up Python
+        if: steps.completion.outputs.should_continue == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
 
       - name: Install project
-        run: python -m pip install -e ".[dev]"
+        if: steps.completion.outputs.should_continue == 'true'
+        id: install
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" 2>&1 | tee install.log
 
-      - name: Generate deterministic cases
-        run: python scripts/generate_cases.py
+      - name: Retry dependency installation once
+        if: >-
+          steps.completion.outputs.should_continue == 'true' &&
+          steps.install.outcome == 'failure'
+        id: install_retry
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          sleep 20
+          python -m pip install -e ".[dev]" 2>&1 |
+            tee install-retry.log
+
+      - name: Generate deterministic failure cases
+        if: >-
+          steps.completion.outputs.should_continue == 'true' &&
+          (steps.install.outcome == 'success' ||
+           steps.install_retry.outcome == 'success')
+        id: generate
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/generate_cases.py 2>&1 |
+            tee generate-cases.log
 
       - name: Run regression tests
-        run: pytest --junitxml=junit.xml
+        if: >-
+          steps.completion.outputs.should_continue == 'true' &&
+          (steps.install.outcome == 'success' ||
+           steps.install_retry.outcome == 'success')
+        id: tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest --junitxml=junit.xml 2>&1 |
+            tee pytest.log
 
-      - name: Download current BLS data
-        run: python scripts/fetch_bls_snapshot.py
+      - name: Download BLS snapshot with retries
+        if: >-
+          steps.completion.outputs.should_continue == 'true' &&
+          (steps.install.outcome == 'success' ||
+           steps.install_retry.outcome == 'success')
+        id: fetch
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
 
-      - name: Validate current BLS data
-        run: >-
-          PYTHONPATH=src python -m mdrlab.cli validate
-          fixtures/raw/bls_lns11300000.latest.json
+          for attempt in 1 2 3; do
+            echo "BLS download attempt $attempt of 3"
 
-      - name: Create health summary
+            if python scripts/fetch_bls_snapshot.py 2>&1 |
+              tee "bls-fetch-attempt-${attempt}.log"; then
+              echo "BLS download succeeded."
+              exit 0
+            fi
+
+            if [[ "$attempt" -lt 3 ]]; then
+              sleep_seconds=$((attempt * 30))
+              echo "Waiting ${sleep_seconds} seconds before retry."
+              sleep "$sleep_seconds"
+            fi
+          done
+
+          echo "BLS download failed after three attempts."
+          exit 1
+
+      - name: Validate live BLS response
+        if: >-
+          steps.completion.outputs.should_continue == 'true' &&
+          steps.fetch.outcome == 'success'
+        id: live_validation
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+
+          PYTHONPATH=src python -m mdrlab.cli validate \
+            fixtures/raw/bls_lns11300000.latest.json 2>&1 |
+            tee live-validation.log
+
+      - name: Classify workflow result
+        if: steps.completion.outputs.should_continue == 'true'
+        id: classify
+        shell: bash
+        run: |
+          install_ok=false
+          tests_ok=false
+          fetch_ok=false
+          validation_ok=false
+
+          if [[ "${{ steps.install.outcome }}" == "success" ||
+                "${{ steps.install_retry.outcome }}" == "success" ]]; then
+            install_ok=true
+          fi
+
+          if [[ "${{ steps.tests.outcome }}" == "success" ]]; then
+            tests_ok=true
+          fi
+
+          if [[ "${{ steps.fetch.outcome }}" == "success" ]]; then
+            fetch_ok=true
+          fi
+
+          if [[ "${{ steps.live_validation.outcome }}" == "success" ]]; then
+            validation_ok=true
+          fi
+
+          if [[ "$install_ok" == "true" &&
+                "$tests_ok" == "true" &&
+                "$fetch_ok" == "true" &&
+                "$validation_ok" == "true" ]]; then
+            classification="healthy"
+          elif [[ "$fetch_ok" == "false" &&
+                  "$install_ok" == "true" &&
+                  "$tests_ok" == "true" ]]; then
+            classification="transient-upstream"
+          else
+            classification="human-input-required"
+          fi
+
+          echo "classification=$classification" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "# Autopilot result"
+            echo
+            echo "- Classification: \`$classification\`"
+            echo "- Installation: \`$install_ok\`"
+            echo "- Regression tests: \`$tests_ok\`"
+            echo "- BLS download: \`$fetch_ok\`"
+            echo "- Live validation: \`$validation_ok\`"
+            echo "- Target: \`$TARGET_VERSION\`"
+            echo "- Commit: \`$GITHUB_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create or update transient failure issue
+        if: steps.classify.outputs.classification == 'transient-upstream'
+        shell: bash
+        run: |
+          issue_number="$(
+            gh issue list \
+              --repo "$GITHUB_REPOSITORY" \
+              --state open \
+              --search "\"$TRANSIENT_TITLE\" in:title" \
+              --json number,title \
+              --jq ".[] | select(.title == \"$TRANSIENT_TITLE\") | .number" |
+              head -n 1
+          )"
+
+          body="The automated BLS download failed after three attempts.
+
+          The local regression tests passed, so this is currently classified
+          as a temporary upstream or network problem.
+
+          Workflow run:
+          $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          Autopilot will retry on the next scheduled cycle."
+
+          if [[ -n "$issue_number" ]]; then
+            gh issue comment "$issue_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body "$body"
+          else
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TRANSIENT_TITLE" \
+              --body "$body" \
+              --label "autopilot,transient-upstream"
+          fi
+
+      - name: Create or update human blocker
+        if: steps.classify.outputs.classification == 'human-input-required'
+        shell: bash
+        run: |
+          issue_number="$(
+            gh issue list \
+              --repo "$GITHUB_REPOSITORY" \
+              --state open \
+              --search "\"$BLOCKER_TITLE\" in:title" \
+              --json number,title \
+              --jq ".[] | select(.title == \"$BLOCKER_TITLE\") | .number" |
+              head -n 1
+          )"
+
+          body="Autopilot encountered a problem that is not safe to repair
+          automatically.
+
+          This may represent a code regression, an unexpected BLS schema
+          change, a new missing-value marker, or a change to benchmark
+          semantics.
+
+          Workflow run:
+          $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          Review the uploaded diagnostic artifact before changing the data
+          contract."
+
+          if [[ -n "$issue_number" ]]; then
+            gh issue comment "$issue_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body "$body"
+          else
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$BLOCKER_TITLE" \
+              --body "$body" \
+              --label "autopilot,human-input-required"
+          fi
+
+      - name: Close resolved operational issues
+        if: steps.classify.outputs.classification == 'healthy'
+        shell: bash
+        run: |
+          close_by_title() {
+            local title="$1"
+
+            issue_numbers="$(
+              gh issue list \
+                --repo "$GITHUB_REPOSITORY" \
+                --state open \
+                --search "\"$title\" in:title" \
+                --json number,title \
+                --jq ".[] | select(.title == \"$title\") | .number"
+            )"
+
+            for issue_number in $issue_numbers; do
+              gh issue comment "$issue_number" \
+                --repo "$GITHUB_REPOSITORY" \
+                --body "The latest autopilot cycle completed successfully. Closing this operational incident automatically."
+
+              gh issue close "$issue_number" \
+                --repo "$GITHUB_REPOSITORY" \
+                --reason completed
+            done
+          }
+
+          close_by_title "$TRANSIENT_TITLE"
+          close_by_title "$BLOCKER_TITLE"
+
+      - name: Create diagnostic bundle
         if: always()
         shell: bash
         run: |
+          mkdir -p autopilot-diagnostics
+
+          cp -f install.log autopilot-diagnostics/ 2>/dev/null || true
+          cp -f install-retry.log autopilot-diagnostics/ 2>/dev/null || true
+          cp -f generate-cases.log autopilot-diagnostics/ 2>/dev/null || true
+          cp -f pytest.log autopilot-diagnostics/ 2>/dev/null || true
+          cp -f junit.xml autopilot-diagnostics/ 2>/dev/null || true
+
+          cp -f bls-fetch-attempt-*.log \
+            autopilot-diagnostics/ 2>/dev/null || true
+
+          cp -f live-validation.log \
+            autopilot-diagnostics/ 2>/dev/null || true
+
+          cp -f fixtures/raw/bls_lns11300000.latest.json \
+            autopilot-diagnostics/ 2>/dev/null || true
+
           {
-            echo "# Market Data Reliability Lab"
-            echo
-            echo "## Automated health check"
-            echo
-            echo "- Repository: $GITHUB_REPOSITORY"
-            echo "- Commit: $GITHUB_SHA"
-            echo "- Workflow run: $GITHUB_RUN_ID"
-            echo "- Execution time: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            echo "- Python: $(python --version)"
-          } > health-summary.md
+            echo "repository=$GITHUB_REPOSITORY"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "commit=$GITHUB_SHA"
+            echo "target=$TARGET_VERSION"
+            echo "timestamp=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          } > autopilot-diagnostics/run-metadata.txt
 
-      - name: Publish workflow summary
-        if: always()
-        shell: bash
-        run: cat health-summary.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload health-check evidence
+      - name: Upload diagnostic artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: health-check-${{ github.run_number }}
-          if-no-files-found: warn
+          name: autopilot-diagnostics-${{ github.run_number }}
+          path: autopilot-diagnostics
           retention-days: 30
-          path: |
-            junit.xml
-            health-summary.md
-            fixtures/raw/bls_lns11300000.latest.json
+          if-no-files-found: warn
 
-  bootstrap-roadmap:
-    name: Bootstrap v0.2.0 roadmap
-    if: github.event.inputs.operation == 'bootstrap-roadmap'
-
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-      issues: write
-
-    env:
-      GH_TOKEN: ${{ github.token }}
-      REPOSITORY: ${{ github.repository }}
-
-    steps:
-      - name: Create CPI dataset issue when absent
+      - name: Fail only when human input is required
+        if: steps.classify.outputs.classification == 'human-input-required'
         shell: bash
         run: |
-          title="Add BLS CPI series CUUR0000SA0"
-
-          existing="$(
-            gh issue list \
-              --repo "$REPOSITORY" \
-              --state all \
-              --search "\"$title\" in:title" \
-              --json title \
-              --jq '.[].title'
-          )"
-
-          if echo "$existing" | grep -Fxq "$title"; then
-            echo "Issue already exists: $title"
-          else
-            gh issue create \
-              --repo "$REPOSITORY" \
-              --title "$title" \
-              --label enhancement \
-              --body "$(cat <<'EOF'
-          ## Goal
-
-          Add the U.S. Consumer Price Index series `CUUR0000SA0`
-          as the second official benchmark dataset.
-
-          ## Acceptance criteria
-
-          - Store an immutable BLS raw fixture
-          - Add source provenance
-          - Add canonical golden CSV output
-          - Add deterministic failure cases
-          - Add automated contract tests
-          - Validate the series in the upstream smoke workflow
-          EOF
-          )"
-          fi
-
-      - name: Create missing-marker regression issue when absent
-        shell: bash
-        run: |
-          title="Add permanent regression coverage for BLS missing markers"
-
-          existing="$(
-            gh issue list \
-              --repo "$REPOSITORY" \
-              --state all \
-              --search "\"$title\" in:title" \
-              --json title \
-              --jq '.[].title'
-          )"
-
-          if echo "$existing" | grep -Fxq "$title"; then
-            echo "Issue already exists: $title"
-          else
-            gh issue create \
-              --repo "$REPOSITORY" \
-              --title "$title" \
-              --label testing \
-              --body "$(cat <<'EOF'
-          ## Goal
-
-          Preserve the real-world BLS failures discovered during
-          development of v0.1.0.
-
-          ## Cases
-
-          - Missing observation represented by `.`
-          - Missing observation represented by `-`
-
-          ## Acceptance criteria
-
-          - Both markers are covered by automated tests
-          - Both observations are skipped during normalization
-          - Unknown non-numeric values remain rejected
-          EOF
-          )"
-          fi
-
-      - name: Create GitHub Actions upgrade issue when absent
-        shell: bash
-        run: |
-          title="Upgrade GitHub Actions runtime dependencies"
-
-          existing="$(
-            gh issue list \
-              --repo "$REPOSITORY" \
-              --state all \
-              --search "\"$title\" in:title" \
-              --json title \
-              --jq '.[].title'
-          )"
-
-          if echo "$existing" | grep -Fxq "$title"; then
-            echo "Issue already exists: $title"
-          else
-            gh issue create \
-              --repo "$REPOSITORY" \
-              --title "$title" \
-              --label maintenance \
-              --body "$(cat <<'EOF'
-          ## Goal
-
-          Upgrade workflow dependencies to maintained versions and
-          remove Node.js 20 deprecation warnings.
-
-          ## Acceptance criteria
-
-          - CI remains successful on Python 3.10 through 3.13
-          - Upstream smoke testing remains successful
-          - Test artifacts remain available
-          - Node.js 20 warnings are removed
-          EOF
-          )"
-          fi
-
-      - name: Write roadmap summary
-        shell: bash
-        run: |
-          {
-            echo "# Roadmap bootstrap completed"
-            echo
-            echo "The project issues were created when absent."
-            echo
-            echo "Existing issues were not duplicated."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  create-release:
-    name: Validate and create release
-    if: github.event.inputs.operation == 'create-release'
-
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
-
-    env:
-      GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ github.event.inputs.version }}
-      RELEASE_TITLE_INPUT: ${{ github.event.inputs.release_title }}
-
-    steps:
-      - name: Validate release input
-        shell: bash
-        run: |
-          if [[ -z "$VERSION" ]]; then
-            echo "::error::Version is required for create-release."
-            exit 1
-          fi
-
-          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Version must use the format v0.2.0."
-            exit 1
-          fi
-
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Refuse duplicate release
-        shell: bash
-        run: |
-          if gh release view "$VERSION" \
-            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error::Release $VERSION already exists."
-            exit 1
-          fi
-
-          if git rev-parse "$VERSION" >/dev/null 2>&1; then
-            echo "::error::Tag $VERSION already exists."
-            exit 1
-          fi
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Install project
-        run: python -m pip install -e ".[dev]"
-
-      - name: Generate deterministic cases
-        run: python scripts/generate_cases.py
-
-      - name: Run release tests
-        run: pytest --junitxml=junit.xml
-
-      - name: Download current BLS snapshot
-        run: python scripts/fetch_bls_snapshot.py
-
-      - name: Validate current BLS snapshot
-        run: >-
-          PYTHONPATH=src python -m mdrlab.cli validate
-          fixtures/raw/bls_lns11300000.latest.json
-
-      - name: Build release archive
-        shell: bash
-        run: |
-          archive="market-data-reliability-lab-${VERSION}.zip"
-
-          zip -r "$archive" . \
-            -x ".git/*" \
-            -x ".pytest_cache/*" \
-            -x "**/__pycache__/*" \
-            -x "*.egg-info/*" \
-            -x "junit.xml" \
-            -x "fixtures/raw/*.latest.json"
-
-          echo "RELEASE_ARCHIVE=$archive" >> "$GITHUB_ENV"
-
-      - name: Select release title
-        shell: bash
-        run: |
-          if [[ -n "$RELEASE_TITLE_INPUT" ]]; then
-            title="$RELEASE_TITLE_INPUT"
-          else
-            title="Market Data Reliability Lab $VERSION"
-          fi
-
-          echo "RELEASE_TITLE=$title" >> "$GITHUB_ENV"
-
-      - name: Create tag and GitHub Release
-        shell: bash
-        run: |
-          gh release create "$VERSION" \
-            "$RELEASE_ARCHIVE" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "$RELEASE_TITLE" \
-            --generate-notes \
-            --verify-tag=false
-
-      - name: Upload release evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-evidence-${{ github.event.inputs.version }}
-          retention-days: 90
-          path: |
-            junit.xml
-            fixtures/raw/bls_lns11300000.latest.json
-            ${{ env.RELEASE_ARCHIVE }}
-
-      - name: Write release summary
-        shell: bash
-        run: |
-          {
-            echo "# Release created"
-            echo
-            echo "- Version: $VERSION"
-            echo "- Title: $RELEASE_TITLE"
-            echo "- Commit: $GITHUB_SHA"
-            echo
-            echo "All tests and the live BLS contract check passed."
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Autopilot requires human input."
+          echo "Open the human-input-required issue for details."
+          exit 1
