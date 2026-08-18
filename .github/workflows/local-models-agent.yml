@@ -15,13 +15,14 @@ jobs:
   maintain:
     name: Generate one maintenance pull request
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     env:
       ALLOWED_REPO: DylanOSlab/market-data-reliability-lab
       DEFAULT_BRANCH: main
       LLAMA_CLI: ./llama.cpp/build/bin/llama-cli
       MODEL_SPEC: Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF:Q4_K_M
+      LLAMA_LOG_COLORS: "0"
       GH_TOKEN: ${{ github.token }}
 
     steps:
@@ -46,15 +47,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            llama.cpp/build/bin/llama-cli
-          key: llama-cpp-cli-${{ runner.os }}-b4940
+            llama.cpp
+          key: llama-cpp-${{ runner.os }}-qwen-agent-v2
 
       - name: Install build dependencies
         if: steps.llama-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install --yes \
+
+          sudo apt-get install \
+            --yes \
             build-essential \
             cmake \
             git \
