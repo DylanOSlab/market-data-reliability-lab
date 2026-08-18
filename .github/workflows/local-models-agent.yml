@@ -94,4 +94,4 @@ jobs:
       - name: Run local Qwen maintenance agent
         shell: bash
         run: |
-          python agent/local_model_agent.py
+          python agent/local_models_agent.py
