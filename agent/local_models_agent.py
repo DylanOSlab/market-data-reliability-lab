@@ -2,8 +2,7 @@ import json
 import os
 import re
 import subprocess
-import urllib.error
-import urllib.request
+import sys
 from pathlib import Path
 
 
@@ -12,77 +11,26 @@ ALLOWED_REPO = os.getenv(
     "DylanOSlab/market-data-reliability-lab",
 )
 
-GITHUB_MODEL = os.getenv(
-    "GITHUB_MODEL",
-    "openai/gpt-4.1-mini",
+LLAMA_CLI = os.getenv(
+    "LLAMA_CLI",
+    "./llama.cpp/build/bin/llama-cli",
 )
 
-GITHUB_MODELS_URL = (
-    "https://models.github.ai/inference/chat/completions"
+MODEL_SPEC = os.getenv(
+    "MODEL_SPEC",
+    "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF:Q4_K_M",
 )
 
-MAX_CONTEXT_CHARACTERS = 120_000
-MAX_FILES_IN_CONTEXT = 80
-MAX_CHANGED_FILES = 5
-MAX_LINES_PER_FILE = 500
+DEFAULT_BRANCH = os.getenv(
+    "DEFAULT_BRANCH",
+    "main",
+)
 
-
-SYSTEM_PROMPT = """
-You are an autonomous software maintenance agent for one disposable
-test repository.
-
-Your goal is to create exactly one small, useful, low-risk change.
-
-Prefer these task types:
-
-1. Add missing regression tests.
-2. Improve deterministic tests.
-3. Improve input validation.
-4. Improve error handling.
-5. Fix a small confirmed defect.
-6. Improve documentation when it does not match the code.
-7. Improve fixture or provenance validation.
-8. Add a small reliability improvement.
-
-Return only valid JSON.
-
-The JSON object must contain these keys:
-
-- summary
-- branch
-- commit_message
-- pr_title
-- pr_body
-- files
-
-The files value must be an array of objects. Each file object must
-contain:
-
-- path
-- content
-
-The content value must contain the complete replacement content of the
-file, not a diff.
-
-Rules:
-
-- Change between one and five files.
-- Keep each replacement file under 500 lines.
-- Do not modify files inside .github.
-- Do not modify .git files.
-- Do not modify environment files.
-- Do not modify secrets, permissions, billing, repository settings,
-  workflows, or security policies.
-- Do not modify lock files.
-- Do not modify binary files.
-- Do not delete files.
-- Do not use parent-directory paths.
-- Do not include test results unless the supplied repository context
-  proves those results.
-- Do not invent source files, functions, dependencies, or behavior.
-- Prefer small changes that can be reviewed and reverted easily.
-- The branch must use this format: ai/<short-slug>.
-""".strip()
+MAX_CONTEXT_CHARACTERS = 24_000
+MAX_CONTEXT_FILES = 40
+MAX_CHANGED_FILES = 3
+MAX_GENERATED_LINES_PER_FILE = 400
+MAX_TOTAL_GENERATED_CHARACTERS = 40_000
 
 
 BINARY_SUFFIXES = {
@@ -92,97 +40,305 @@ BINARY_SUFFIXES = {
     ".gif",
     ".webp",
     ".ico",
+    ".pdf",
     ".zip",
     ".gz",
     ".tar",
-    ".pdf",
+    ".7z",
     ".exe",
     ".dll",
     ".so",
     ".bin",
     ".pyc",
+    ".pyd",
+    ".woff",
+    ".woff2",
+    ".ttf",
 }
 
 
 BLOCKED_PATH_PREFIXES = (
     ".github/",
     ".git/",
+    ".automation/",
     ".env",
 )
 
 
-def run_command(*args):
-    """Run a command and return standard output."""
+BLOCKED_FILE_NAMES = {
+    "package-lock.json",
+    "poetry.lock",
+    "uv.lock",
+    "Pipfile.lock",
+}
 
-    return subprocess.check_output(
+
+PRIORITY_PATH_PREFIXES = (
+    "src/",
+    "tests/",
+    "scripts/",
+    "fixtures/",
+    "provenance/",
+)
+
+
+SYSTEM_PROMPT = """
+You are an autonomous software maintenance agent for one public,
+disposable test repository.
+
+Choose exactly one small, useful, low-risk maintenance change.
+
+Preferred work, in order:
+
+1. Add a missing regression test.
+2. Improve deterministic test coverage.
+3. Fix a small confirmed defect.
+4. Improve input validation.
+5. Improve error handling.
+6. Improve fixture or provenance validation.
+7. Correct documentation that clearly disagrees with source code.
+
+Do not attempt a large refactor.
+
+Return only one valid JSON object.
+
+Required JSON structure:
+
+{
+  "summary": "short explanation",
+  "branch": "ai/short-lowercase-slug",
+  "commit_message": "short commit message",
+  "pr_title": "pull request title",
+  "pr_body": "pull request body",
+  "files": [
+    {
+      "path": "relative/repository/path",
+      "content": "complete replacement file content"
+    }
+  ]
+}
+
+Rules:
+
+- Change one to three files only.
+- Return complete replacement content, not a diff.
+- Keep each generated file below 400 lines.
+- Never modify anything under .github.
+- Never modify anything under .git.
+- Never modify anything under .automation.
+- Never modify environment files.
+- Never modify secrets, credentials, tokens, permissions, billing,
+  repository settings, workflows, Actions configuration, or security
+  policies.
+- Never modify lock files.
+- Never modify binary files.
+- Never delete files.
+- Never use an absolute path.
+- Never use a parent-directory path.
+- Do not claim that tests passed.
+- Do not invent files, functions, dependencies, or existing behavior.
+- Prefer modifying existing files.
+- Any new behavior should include a focused test when practical.
+- Keep the change easy to review and easy to revert.
+""".strip()
+
+
+def run_command(*args, check=True):
+    """Run a command and return its standard output."""
+
+    process = subprocess.run(
         args,
         text=True,
-    ).strip()
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    if check and process.returncode != 0:
+        raise RuntimeError(
+            f"Command failed: {' '.join(args)}\n"
+            f"Exit code: {process.returncode}\n"
+            f"Standard output:\n{process.stdout}\n"
+            f"Standard error:\n{process.stderr}"
+        )
+
+    return process.stdout.strip()
 
 
-def is_allowed_context_file(path):
-    """Return True when a repository file is safe for model context."""
+def is_safe_context_file(path):
+    """Decide whether a repository file can be sent to the model."""
 
     if not path.is_file():
         return False
 
     normalized = path.as_posix()
 
-    if ".git" in path.parts:
+    if any(
+        normalized.startswith(prefix)
+        for prefix in BLOCKED_PATH_PREFIXES
+    ):
         return False
 
-    if normalized.startswith(".github/"):
+    if path.name in BLOCKED_FILE_NAMES:
         return False
 
     if path.suffix.lower() in BINARY_SUFFIXES:
         return False
 
-    if path.stat().st_size > 40_000:
+    try:
+        if path.stat().st_size > 30_000:
+            return False
+    except OSError:
         return False
 
     return True
 
 
+def context_sort_key(path):
+    """Prioritize source, tests, and project configuration."""
+
+    normalized = path.as_posix()
+
+    for index, prefix in enumerate(PRIORITY_PATH_PREFIXES):
+        if normalized.startswith(prefix):
+            return index, normalized
+
+    if normalized == "pyproject.toml":
+        return 10, normalized
+
+    if normalized == "README.md":
+        return 11, normalized
+
+    return 20, normalized
+
+
 def build_repository_context():
-    """Read a bounded selection of repository text files."""
+    """Build a bounded repository snapshot for the local model."""
 
-    allowed_files = []
+    candidates = [
+        path
+        for path in Path(".").rglob("*")
+        if is_safe_context_file(path)
+    ]
 
-    for path in Path(".").rglob("*"):
-        if is_allowed_context_file(path):
-            allowed_files.append(path)
+    candidates.sort(key=context_sort_key)
+    candidates = candidates[:MAX_CONTEXT_FILES]
 
-    allowed_files.sort(
-        key=lambda item: item.as_posix()
-    )
+    sections = []
+    current_size = 0
 
-    allowed_files = allowed_files[:MAX_FILES_IN_CONTEXT]
-
-    chunks = []
-
-    for path in allowed_files:
+    for path in candidates:
         try:
             content = path.read_text(
                 encoding="utf-8",
                 errors="replace",
             )
-
-            chunks.append(
-                f"\n--- FILE: {path.as_posix()} ---\n"
-                f"{content}"
-            )
         except OSError:
             continue
 
-    context = "".join(chunks)
+        section = (
+            f"\n--- FILE: {path.as_posix()} ---\n"
+            f"{content}\n"
+        )
 
-    return context[:MAX_CONTEXT_CHARACTERS]
+        if current_size + len(section) > MAX_CONTEXT_CHARACTERS:
+            remaining = MAX_CONTEXT_CHARACTERS - current_size
+
+            if remaining > 500:
+                sections.append(section[:remaining])
+
+            break
+
+        sections.append(section)
+        current_size += len(section)
+
+    return "".join(sections)
 
 
-def remove_markdown_fence(text):
-    """Remove an optional JSON Markdown code fence."""
+def build_model_prompt(repository_context):
+    """Create the complete instruction passed to llama.cpp."""
 
-    cleaned = text.strip()
+    return (
+        "<|im_start|>system\n"
+        f"{SYSTEM_PROMPT}"
+        "<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"Repository: {ALLOWED_REPO}\n\n"
+        "Review the repository snapshot below and choose exactly one "
+        "small maintenance task. Return only the required JSON object."
+        "\n\n"
+        f"{repository_context}"
+        "\n<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+
+def run_local_model(prompt):
+    """Run Qwen Coder through llama.cpp."""
+
+    cli_path = Path(LLAMA_CLI)
+
+    if not cli_path.exists():
+        raise FileNotFoundError(
+            f"llama.cpp executable was not found: {LLAMA_CLI}"
+        )
+
+    command = [
+        str(cli_path),
+        "-hf",
+        MODEL_SPEC,
+        "-p",
+        prompt,
+        "-n",
+        "5000",
+        "-c",
+        "16384",
+        "-t",
+        str(max(1, os.cpu_count() or 1)),
+        "--temp",
+        "0.1",
+        "--top-p",
+        "0.9",
+        "--repeat-penalty",
+        "1.05",
+        "--no-display-prompt",
+        "--no-mmap",
+    ]
+
+    process = subprocess.run(
+        command,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=900,
+    )
+
+    print(
+        process.stderr,
+        file=sys.stderr,
+    )
+
+    if process.returncode != 0:
+        raise RuntimeError(
+            "Local model execution failed.\n"
+            f"Exit code: {process.returncode}\n"
+            f"Output:\n{process.stdout}\n"
+            f"Errors:\n{process.stderr}"
+        )
+
+    if not process.stdout.strip():
+        raise ValueError(
+            "The local model returned an empty response."
+        )
+
+    return process.stdout.strip()
+
+
+def extract_json_object(model_output):
+    """Extract the first complete JSON object from model output."""
+
+    cleaned = model_output.strip()
 
     cleaned = re.sub(
         r"^```(?:json)?\s*",
@@ -197,89 +353,89 @@ def remove_markdown_fence(text):
         cleaned,
     )
 
-    return cleaned.strip()
+    decoder = json.JSONDecoder()
 
+    for index, character in enumerate(cleaned):
+        if character != "{":
+            continue
 
-def call_github_models(prompt):
-    """Call GitHub Models using the workflow GITHUB_TOKEN."""
+        try:
+            parsed, _ = decoder.raw_decode(
+                cleaned[index:]
+            )
 
-    token = os.environ["GITHUB_MODELS_TOKEN"]
+            if isinstance(parsed, dict):
+                return parsed
 
-    request_body = {
-        "model": GITHUB_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        "temperature": 0.2,
-        "max_tokens": 6000,
-        "stream": False,
-    }
+        except json.JSONDecodeError:
+            continue
 
-    encoded_body = json.dumps(
-        request_body
-    ).encode("utf-8")
-
-    request = urllib.request.Request(
-        GITHUB_MODELS_URL,
-        data=encoded_body,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+    raise ValueError(
+        "The local model did not return a valid JSON object.\n\n"
+        f"Raw model output:\n{model_output}"
     )
 
-    try:
-        with urllib.request.urlopen(
-            request,
-            timeout=180,
-        ) as response:
-            response_data = json.load(response)
 
-    except urllib.error.HTTPError as error:
-        error_body = error.read().decode(
-            "utf-8",
-            errors="replace",
-        )
+def validate_relative_path(path_value):
+    """Validate a generated repository-relative path."""
 
-        raise RuntimeError(
-            "GitHub Models request failed with "
-            f"HTTP {error.code}: {error_body}"
-        ) from error
-
-    choices = response_data.get("choices", [])
-
-    if not choices:
+    if not isinstance(path_value, str):
         raise ValueError(
-            "GitHub Models returned no completion choices."
+            "Every generated file must have a string path."
         )
 
-    message = choices[0].get("message", {})
-    generated_text = message.get("content", "")
+    normalized = path_value.replace("\\", "/").strip()
 
-    if not generated_text:
+    if not normalized:
         raise ValueError(
-            "GitHub Models returned an empty response."
+            "Generated file path cannot be empty."
         )
 
-    json_text = remove_markdown_fence(
-        generated_text
-    )
+    if normalized.startswith("/"):
+        raise ValueError(
+            f"Absolute path blocked: {normalized}"
+        )
 
-    return json.loads(json_text)
+    if re.match(r"^[A-Za-z]:/", normalized):
+        raise ValueError(
+            f"Windows absolute path blocked: {normalized}"
+        )
+
+    if any(
+        normalized.startswith(prefix)
+        for prefix in BLOCKED_PATH_PREFIXES
+    ):
+        raise ValueError(
+            f"Protected path blocked: {normalized}"
+        )
+
+    path_object = Path(normalized)
+
+    if ".." in path_object.parts:
+        raise ValueError(
+            f"Parent-directory path blocked: {normalized}"
+        )
+
+    if path_object.name in BLOCKED_FILE_NAMES:
+        raise ValueError(
+            f"Lock file blocked: {normalized}"
+        )
+
+    if path_object.suffix.lower() in BINARY_SUFFIXES:
+        raise ValueError(
+            f"Binary file blocked: {normalized}"
+        )
+
+    return normalized
 
 
 def validate_generated_plan(plan):
-    """Validate model output before making repository changes."""
+    """Validate model output before changing repository files."""
+
+    if not isinstance(plan, dict):
+        raise ValueError(
+            "Generated plan must be a JSON object."
+        )
 
     required_text_fields = (
         "summary",
@@ -294,98 +450,112 @@ def validate_generated_plan(plan):
 
         if not isinstance(value, str) or not value.strip():
             raise ValueError(
-                f"Missing or invalid field: {field}"
+                f"Missing or invalid generated field: {field}"
             )
 
-    files = plan.get("files")
-
-    if not isinstance(files, list):
-        raise ValueError(
-            "The files field must be an array."
-        )
-
-    if not 1 <= len(files) <= MAX_CHANGED_FILES:
-        raise ValueError(
-            "The plan must change between one and "
-            f"{MAX_CHANGED_FILES} files."
-        )
-
-    branch = plan["branch"]
+    branch = plan["branch"].strip()
 
     if not re.fullmatch(
         r"ai/[a-z0-9][a-z0-9._-]{2,60}",
         branch,
     ):
         raise ValueError(
-            "The branch must match ai/<short-slug>."
+            "Generated branch must match ai/<short-lowercase-slug>."
+        )
+
+    files = plan.get("files")
+
+    if not isinstance(files, list):
+        raise ValueError(
+            "Generated files value must be an array."
+        )
+
+    if not 1 <= len(files) <= MAX_CHANGED_FILES:
+        raise ValueError(
+            "The generated plan must modify between one and "
+            f"{MAX_CHANGED_FILES} files."
         )
 
     seen_paths = set()
+    total_characters = 0
 
     for item in files:
         if not isinstance(item, dict):
             raise ValueError(
-                "Every files entry must be an object."
+                "Each generated files entry must be an object."
             )
 
-        path_value = item.get("path")
+        normalized_path = validate_relative_path(
+            item.get("path")
+        )
+
         content = item.get("content")
-
-        if not isinstance(path_value, str):
-            raise ValueError(
-                "Every file must have a path."
-            )
 
         if not isinstance(content, str):
             raise ValueError(
-                f"File content must be text: {path_value}"
+                f"Generated content must be text: {normalized_path}"
             )
 
-        normalized_path = path_value.replace(
-            "\\",
-            "/",
-        )
-
-        path_object = Path(normalized_path)
-
-        if normalized_path.startswith(
-            BLOCKED_PATH_PREFIXES
-        ):
+        if not content.strip():
             raise ValueError(
-                f"Blocked path: {normalized_path}"
-            )
-
-        if ".." in path_object.parts:
-            raise ValueError(
-                f"Parent-directory path blocked: "
-                f"{normalized_path}"
-            )
-
-        if path_object.suffix.lower() in BINARY_SUFFIXES:
-            raise ValueError(
-                f"Binary file blocked: {normalized_path}"
+                f"Generated content cannot be empty: {normalized_path}"
             )
 
         if normalized_path in seen_paths:
             raise ValueError(
-                f"Duplicate file path: {normalized_path}"
+                f"Duplicate generated path: {normalized_path}"
             )
 
         seen_paths.add(normalized_path)
 
         line_count = len(content.splitlines())
 
-        if line_count > MAX_LINES_PER_FILE:
+        if line_count > MAX_GENERATED_LINES_PER_FILE:
             raise ValueError(
-                f"Generated file is too large: "
-                f"{normalized_path} has {line_count} lines."
+                f"Generated file is too large: {normalized_path} "
+                f"has {line_count} lines."
             )
+
+        total_characters += len(content)
+
+        item["path"] = normalized_path
+
+    if total_characters > MAX_TOTAL_GENERATED_CHARACTERS:
+        raise ValueError(
+            "Generated content exceeds the total size limit."
+        )
+
+
+def ensure_branch_does_not_exist(branch):
+    """Prevent accidentally reusing an existing branch."""
+
+    process = subprocess.run(
+        [
+            "git",
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            "origin",
+            branch,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+
+    if process.returncode == 0:
+        raise ValueError(
+            f"Generated branch already exists: {branch}"
+        )
 
 
 def apply_generated_plan(plan):
-    """Create a branch, commit files, push, and open a PR."""
+    """Create a branch, commit the generated files, and open a PR."""
 
-    branch = plan["branch"]
+    branch = plan["branch"].strip()
+
+    ensure_branch_does_not_exist(branch)
 
     run_command(
         "git",
@@ -394,7 +564,7 @@ def apply_generated_plan(plan):
         branch,
     )
 
-    generated_paths = []
+    changed_paths = []
 
     for item in plan["files"]:
         path = Path(item["path"])
@@ -409,7 +579,7 @@ def apply_generated_plan(plan):
             encoding="utf-8",
         )
 
-        generated_paths.append(
+        changed_paths.append(
             item["path"]
         )
 
@@ -417,18 +587,18 @@ def apply_generated_plan(plan):
         "git",
         "add",
         "--",
-        *generated_paths,
+        *changed_paths,
     )
 
-    repository_status = run_command(
+    status = run_command(
         "git",
         "status",
         "--porcelain",
     )
 
-    if not repository_status:
+    if not status:
         raise ValueError(
-            "The model produced no repository changes."
+            "The generated plan produced no repository changes."
         )
 
     subprocess.run(
@@ -441,11 +611,21 @@ def apply_generated_plan(plan):
         check=True,
     )
 
+    print("Generated staged diff:")
+    print(
+        run_command(
+            "git",
+            "diff",
+            "--cached",
+            "--stat",
+        )
+    )
+
     run_command(
         "git",
         "commit",
         "-m",
-        plan["commit_message"],
+        plan["commit_message"].strip(),
     )
 
     run_command(
@@ -457,11 +637,12 @@ def apply_generated_plan(plan):
     )
 
     pull_request_body = (
-        plan["pr_body"]
+        plan["pr_body"].strip()
         + "\n\n"
-        + "Generated by the GitHub Models maintenance agent."
-        + "\n"
-        + "This is a repository-scoped experimental automation."
+        + "Generated by a local Qwen Coder model running inside "
+        + "GitHub Actions."
+        + "\n\n"
+        + "No external model API or API key was used."
     )
 
     run_command(
@@ -469,17 +650,19 @@ def apply_generated_plan(plan):
         "pr",
         "create",
         "--base",
-        "main",
+        DEFAULT_BRANCH,
         "--head",
         branch,
         "--title",
-        plan["pr_title"],
+        plan["pr_title"].strip(),
         "--body",
         pull_request_body,
     )
 
 
 def main():
+    """Run one repository-scoped maintenance cycle."""
+
     actual_repository = os.getenv(
         "GITHUB_REPOSITORY",
         "",
@@ -487,32 +670,44 @@ def main():
 
     if actual_repository != ALLOWED_REPO:
         raise SystemExit(
-            "Repository blocked. "
-            f"Received {actual_repository!r}, "
+            "Repository scope check failed. "
+            f"Received {actual_repository!r}; "
             f"expected {ALLOWED_REPO!r}."
         )
 
     repository_context = build_repository_context()
 
-    if not repository_context:
+    if not repository_context.strip():
         raise SystemExit(
             "No eligible repository files were found."
         )
 
-    prompt = (
-        "Review the repository snapshot below. "
-        "Choose exactly one small, useful maintenance task. "
-        "Return one valid JSON plan according to the system "
-        "instructions.\n\n"
-        f"Repository: {actual_repository}\n"
-        f"Target model: {GITHUB_MODEL}\n"
-        f"{repository_context}"
+    print(
+        "Repository context size:",
+        len(repository_context),
+        "characters",
     )
 
-    plan = call_github_models(prompt)
+    prompt = build_model_prompt(
+        repository_context
+    )
 
-    validate_generated_plan(plan)
+    model_output = run_local_model(
+        prompt
+    )
 
+    print("Raw local model output:")
+    print(model_output)
+
+    plan = extract_json_object(
+        model_output
+    )
+
+    validate_generated_plan(
+        plan
+    )
+
+    print("Validated maintenance plan:")
     print(
         json.dumps(
             plan,
@@ -521,7 +716,9 @@ def main():
         )
     )
 
-    apply_generated_plan(plan)
+    apply_generated_plan(
+        plan
+    )
 
 
 if __name__ == "__main__":
