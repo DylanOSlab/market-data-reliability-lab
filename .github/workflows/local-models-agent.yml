@@ -15,13 +15,13 @@ jobs:
   maintain:
     name: Generate one maintenance pull request
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 40
 
     env:
       ALLOWED_REPO: DylanOSlab/market-data-reliability-lab
       DEFAULT_BRANCH: main
       LLAMA_CLI: ./llama.cpp/build/bin/llama-cli
-      MODEL_SPEC: Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF:Q4_K_M
+      MODEL_SPEC: Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF:Q4_K_M
       LLAMA_LOG_COLORS: "0"
       GH_TOKEN: ${{ github.token }}
 
@@ -46,31 +46,21 @@ jobs:
         id: llama-cache
         uses: actions/cache@v4
         with:
-          path: |
-            llama.cpp
-          key: llama-cpp-${{ runner.os }}-qwen-agent-v2
+          path: llama.cpp
+          key: llama-cpp-${{ runner.os }}-local-qwen-v4
 
       - name: Install build dependencies
         if: steps.llama-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           sudo apt-get update
-
-          sudo apt-get install \
-            --yes \
-            build-essential \
-            cmake \
-            git \
-            libcurl4-openssl-dev
+          sudo apt-get install --yes build-essential cmake git libcurl4-openssl-dev
 
       - name: Download llama.cpp source
         if: steps.llama-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          git clone \
-            --depth 1 \
-            https://github.com/ggml-org/llama.cpp.git \
-            llama.cpp
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp
 
       - name: Build llama.cpp
         if: steps.llama-cache.outputs.cache-hit != 'true'
@@ -96,5 +86,4 @@ jobs:
 
       - name: Run local Qwen maintenance agent
         shell: bash
-        run: |
-          python agent/local_models_agent.py
+        run: python agent/local_models_agent.py
