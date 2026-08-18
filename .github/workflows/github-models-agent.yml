@@ -1,0 +1,44 @@
+name: GitHub Models maintenance agent
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: github-models-maintenance-agent
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  models: read
+
+jobs:
+  maintain:
+    name: Generate one small maintenance pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure Git identity
+        shell: bash
+        run: |
+          git config user.name "github-models-maintenance-agent[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run GitHub Models maintenance agent
+        env:
+          GITHUB_MODELS_TOKEN: ${{ github.token }}
+          GITHUB_MODEL: ${{ vars.GITHUB_MODEL || 'openai/gpt-4.1-mini' }}
+          ALLOWED_REPO: DylanOSlab/market-data-reliability-lab
+          GH_TOKEN: ${{ github.token }}
+        run: python agent/github_models_agent.py
