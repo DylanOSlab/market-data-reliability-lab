@@ -11,6 +11,11 @@ ALLOWED_REPO = os.getenv(
     "DylanOSlab/market-data-reliability-lab",
 )
 
+DEFAULT_BRANCH = os.getenv(
+    "DEFAULT_BRANCH",
+    "main",
+)
+
 LLAMA_CLI = os.getenv(
     "LLAMA_CLI",
     "./llama.cpp/build/bin/llama-cli",
@@ -21,16 +26,15 @@ MODEL_SPEC = os.getenv(
     "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF:Q4_K_M",
 )
 
-DEFAULT_BRANCH = os.getenv(
-    "DEFAULT_BRANCH",
-    "main",
-)
 
-MAX_CONTEXT_CHARACTERS = 24_000
-MAX_CONTEXT_FILES = 40
-MAX_CHANGED_FILES = 3
-MAX_GENERATED_LINES_PER_FILE = 400
-MAX_TOTAL_GENERATED_CHARACTERS = 40_000
+MAX_CONTEXT_CHARACTERS = 12_000
+MAX_CONTEXT_FILES = 24
+MAX_CHANGED_FILES = 2
+MAX_GENERATED_LINES_PER_FILE = 300
+MAX_TOTAL_GENERATED_CHARACTERS = 20_000
+MAX_GENERATED_TOKENS = 1_200
+MODEL_CONTEXT_SIZE = 8_192
+MODEL_TIMEOUT_SECONDS = 1_500
 
 
 BINARY_SUFFIXES = {
@@ -83,12 +87,13 @@ PRIORITY_PATH_PREFIXES = (
 
 
 SYSTEM_PROMPT = """
-You are an autonomous software maintenance agent for one public,
-disposable test repository.
+You are an autonomous software maintenance agent working inside one
+public experimental repository.
 
-Choose exactly one small, useful, low-risk maintenance change.
+Choose exactly one small, useful, low-risk change that advances the
+project.
 
-Preferred work, in order:
+Preferred task types, in order:
 
 1. Add a missing regression test.
 2. Improve deterministic test coverage.
@@ -98,11 +103,9 @@ Preferred work, in order:
 6. Improve fixture or provenance validation.
 7. Correct documentation that clearly disagrees with source code.
 
-Do not attempt a large refactor.
+Do not perform a large refactor.
 
-Return only one valid JSON object.
-
-Required JSON structure:
+Return only one valid JSON object using this exact structure:
 
 {
   "summary": "short explanation",
@@ -118,11 +121,11 @@ Required JSON structure:
   ]
 }
 
-Rules:
+Mandatory rules:
 
-- Change one to three files only.
-- Return complete replacement content, not a diff.
-- Keep each generated file below 400 lines.
+- Change one or two files only.
+- Return complete replacement file content, not a diff.
+- Keep each generated file below 300 lines.
 - Never modify anything under .github.
 - Never modify anything under .git.
 - Never modify anything under .automation.
@@ -130,13 +133,14 @@ Rules:
 - Never modify secrets, credentials, tokens, permissions, billing,
   repository settings, workflows, Actions configuration, or security
   policies.
-- Never modify lock files.
+- Never modify dependency lock files.
 - Never modify binary files.
 - Never delete files.
 - Never use an absolute path.
 - Never use a parent-directory path.
-- Do not claim that tests passed.
-- Do not invent files, functions, dependencies, or existing behavior.
+- Never claim that tests passed.
+- Never invent files, functions, dependencies, APIs, or existing
+  behavior.
 - Prefer modifying existing files.
 - Any new behavior should include a focused test when practical.
 - Keep the change easy to review and easy to revert.
@@ -144,7 +148,7 @@ Rules:
 
 
 def run_command(*args, check=True):
-    """Run a command and return its standard output."""
+    """Run a command and return standard output."""
 
     process = subprocess.run(
         args,
@@ -166,7 +170,7 @@ def run_command(*args, check=True):
 
 
 def is_safe_context_file(path):
-    """Decide whether a repository file can be sent to the model."""
+    """Return True when a file is safe to include in model context."""
 
     if not path.is_file():
         return False
@@ -186,7 +190,7 @@ def is_safe_context_file(path):
         return False
 
     try:
-        if path.stat().st_size > 30_000:
+        if path.stat().st_size > 24_000:
             return False
     except OSError:
         return False
@@ -195,7 +199,7 @@ def is_safe_context_file(path):
 
 
 def context_sort_key(path):
-    """Prioritize source, tests, and project configuration."""
+    """Prioritize source, tests, fixtures, and project metadata."""
 
     normalized = path.as_posix()
 
@@ -209,11 +213,14 @@ def context_sort_key(path):
     if normalized == "README.md":
         return 11, normalized
 
+    if normalized == "INSTALL_NEXT.md":
+        return 12, normalized
+
     return 20, normalized
 
 
 def build_repository_context():
-    """Build a bounded repository snapshot for the local model."""
+    """Build a bounded repository snapshot for the model."""
 
     candidates = [
         path
@@ -241,10 +248,15 @@ def build_repository_context():
             f"{content}\n"
         )
 
-        if current_size + len(section) > MAX_CONTEXT_CHARACTERS:
-            remaining = MAX_CONTEXT_CHARACTERS - current_size
+        remaining = (
+            MAX_CONTEXT_CHARACTERS - current_size
+        )
 
-            if remaining > 500:
+        if remaining <= 0:
+            break
+
+        if len(section) > remaining:
+            if remaining >= 500:
                 sections.append(section[:remaining])
 
             break
@@ -256,25 +268,26 @@ def build_repository_context():
 
 
 def build_model_prompt(repository_context):
-    """Create the complete instruction passed to llama.cpp."""
+    """Create the complete ChatML prompt for Qwen."""
 
     return (
         "<|im_start|>system\n"
-        f"{SYSTEM_PROMPT}"
+        f"{SYSTEM_PROMPT}\n"
         "<|im_end|>\n"
         "<|im_start|>user\n"
         f"Repository: {ALLOWED_REPO}\n\n"
-        "Review the repository snapshot below and choose exactly one "
-        "small maintenance task. Return only the required JSON object."
-        "\n\n"
-        f"{repository_context}"
-        "\n<|im_end|>\n"
+        "Review the repository snapshot below. "
+        "Choose exactly one small maintenance task that can be "
+        "completed using the supplied files. "
+        "Return only the required JSON object.\n\n"
+        f"{repository_context}\n"
+        "<|im_end|>\n"
         "<|im_start|>assistant\n"
     )
 
 
 def run_local_model(prompt):
-    """Run Qwen Coder through llama.cpp."""
+    """Run Qwen Coder through llama.cpp with CPU-safe limits."""
 
     cli_path = Path(LLAMA_CLI)
 
@@ -283,6 +296,11 @@ def run_local_model(prompt):
             f"llama.cpp executable was not found: {LLAMA_CLI}"
         )
 
+    thread_count = min(
+        4,
+        max(1, os.cpu_count() or 1),
+    )
+
     command = [
         str(cli_path),
         "-hf",
@@ -290,11 +308,11 @@ def run_local_model(prompt):
         "-p",
         prompt,
         "-n",
-        "5000",
+        str(MAX_GENERATED_TOKENS),
         "-c",
-        "16384",
+        str(MODEL_CONTEXT_SIZE),
         "-t",
-        str(max(1, os.cpu_count() or 1)),
+        str(thread_count),
         "--temp",
         "0.1",
         "--top-p",
@@ -305,34 +323,73 @@ def run_local_model(prompt):
         "--no-mmap",
     ]
 
-    process = subprocess.run(
-        command,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        timeout=900,
+    print("Starting local Qwen inference.", flush=True)
+    print(
+        f"Model: {MODEL_SPEC}",
+        flush=True,
+    )
+    print(
+        f"Prompt size: {len(prompt)} characters",
+        flush=True,
+    )
+    print(
+        f"Maximum generated tokens: "
+        f"{MAX_GENERATED_TOKENS}",
+        flush=True,
+    )
+    print(
+        f"Model context size: {MODEL_CONTEXT_SIZE}",
+        flush=True,
+    )
+    print(
+        f"CPU threads: {thread_count}",
+        flush=True,
     )
 
-    print(
-        process.stderr,
-        file=sys.stderr,
-    )
+    try:
+        process = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=MODEL_TIMEOUT_SECONDS,
+        )
+
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            "Local model exceeded the 25-minute inference limit. "
+            "The repository context or output limit must be reduced."
+        ) from error
+
+    if process.stderr:
+        print(
+            process.stderr,
+            file=sys.stderr,
+            flush=True,
+        )
 
     if process.returncode != 0:
         raise RuntimeError(
             "Local model execution failed.\n"
             f"Exit code: {process.returncode}\n"
-            f"Output:\n{process.stdout}\n"
-            f"Errors:\n{process.stderr}"
+            f"Standard output:\n{process.stdout}\n"
+            f"Standard error:\n{process.stderr}"
         )
 
-    if not process.stdout.strip():
+    output = process.stdout.strip()
+
+    if not output:
         raise ValueError(
             "The local model returned an empty response."
         )
 
-    return process.stdout.strip()
+    print(
+        f"Local model returned {len(output)} characters.",
+        flush=True,
+    )
+
+    return output
 
 
 def extract_json_object(model_output):
@@ -384,7 +441,10 @@ def validate_relative_path(path_value):
             "Every generated file must have a string path."
         )
 
-    normalized = path_value.replace("\\", "/").strip()
+    normalized = path_value.replace(
+        "\\",
+        "/",
+    ).strip()
 
     if not normalized:
         raise ValueError(
@@ -448,9 +508,14 @@ def validate_generated_plan(plan):
     for field in required_text_fields:
         value = plan.get(field)
 
-        if not isinstance(value, str) or not value.strip():
+        if not isinstance(value, str):
             raise ValueError(
-                f"Missing or invalid generated field: {field}"
+                f"Missing or invalid field: {field}"
+            )
+
+        if not value.strip():
+            raise ValueError(
+                f"Generated field cannot be empty: {field}"
             )
 
     branch = plan["branch"].strip()
@@ -460,7 +525,8 @@ def validate_generated_plan(plan):
         branch,
     ):
         raise ValueError(
-            "Generated branch must match ai/<short-lowercase-slug>."
+            "Generated branch must match "
+            "ai/<short-lowercase-slug>."
         )
 
     files = plan.get("files")
@@ -493,12 +559,14 @@ def validate_generated_plan(plan):
 
         if not isinstance(content, str):
             raise ValueError(
-                f"Generated content must be text: {normalized_path}"
+                f"Generated content must be text: "
+                f"{normalized_path}"
             )
 
         if not content.strip():
             raise ValueError(
-                f"Generated content cannot be empty: {normalized_path}"
+                f"Generated content cannot be empty: "
+                f"{normalized_path}"
             )
 
         if normalized_path in seen_paths:
@@ -508,16 +576,17 @@ def validate_generated_plan(plan):
 
         seen_paths.add(normalized_path)
 
-        line_count = len(content.splitlines())
+        line_count = len(
+            content.splitlines()
+        )
 
         if line_count > MAX_GENERATED_LINES_PER_FILE:
             raise ValueError(
-                f"Generated file is too large: {normalized_path} "
-                f"has {line_count} lines."
+                f"Generated file is too large: "
+                f"{normalized_path} has {line_count} lines."
             )
 
         total_characters += len(content)
-
         item["path"] = normalized_path
 
     if total_characters > MAX_TOTAL_GENERATED_CHARACTERS:
@@ -527,7 +596,7 @@ def validate_generated_plan(plan):
 
 
 def ensure_branch_does_not_exist(branch):
-    """Prevent accidentally reusing an existing branch."""
+    """Prevent accidentally reusing a remote branch."""
 
     process = subprocess.run(
         [
@@ -551,11 +620,13 @@ def ensure_branch_does_not_exist(branch):
 
 
 def apply_generated_plan(plan):
-    """Create a branch, commit the generated files, and open a PR."""
+    """Create a branch, commit files, push, and open a PR."""
 
     branch = plan["branch"].strip()
 
-    ensure_branch_does_not_exist(branch)
+    ensure_branch_does_not_exist(
+        branch
+    )
 
     run_command(
         "git",
@@ -611,14 +682,19 @@ def apply_generated_plan(plan):
         check=True,
     )
 
-    print("Generated staged diff:")
+    print(
+        "Generated staged diff:",
+        flush=True,
+    )
+
     print(
         run_command(
             "git",
             "diff",
             "--cached",
             "--stat",
-        )
+        ),
+        flush=True,
     )
 
     run_command(
@@ -639,13 +715,13 @@ def apply_generated_plan(plan):
     pull_request_body = (
         plan["pr_body"].strip()
         + "\n\n"
-        + "Generated by a local Qwen Coder model running inside "
-        + "GitHub Actions."
+        + "Generated by a local Qwen Coder model running "
+        + "inside GitHub Actions."
         + "\n\n"
         + "No external model API or API key was used."
     )
 
-    run_command(
+    pull_request_url = run_command(
         "gh",
         "pr",
         "create",
@@ -659,9 +735,15 @@ def apply_generated_plan(plan):
         pull_request_body,
     )
 
+    print(
+        "Pull request created:",
+        pull_request_url,
+        flush=True,
+    )
+
 
 def main():
-    """Run one repository-scoped maintenance cycle."""
+    """Run one repository-scoped development cycle."""
 
     actual_repository = os.getenv(
         "GITHUB_REPOSITORY",
@@ -686,6 +768,7 @@ def main():
         "Repository context size:",
         len(repository_context),
         "characters",
+        flush=True,
     )
 
     prompt = build_model_prompt(
@@ -696,8 +779,15 @@ def main():
         prompt
     )
 
-    print("Raw local model output:")
-    print(model_output)
+    print(
+        "Raw local model output:",
+        flush=True,
+    )
+
+    print(
+        model_output,
+        flush=True,
+    )
 
     plan = extract_json_object(
         model_output
@@ -707,13 +797,18 @@ def main():
         plan
     )
 
-    print("Validated maintenance plan:")
+    print(
+        "Validated maintenance plan:",
+        flush=True,
+    )
+
     print(
         json.dumps(
             plan,
             indent=2,
             ensure_ascii=False,
-        )
+        ),
+        flush=True,
     )
 
     apply_generated_plan(
