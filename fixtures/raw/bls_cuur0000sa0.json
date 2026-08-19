@@ -1,0 +1,24 @@
+{
+  "Results": {
+    "series": [
+      {
+        "data": [
+          {
+            "footnotes": [
+              {}
+            ],
+            "latest": "true",
+            "period": "M12",
+            "periodName": "December",
+            "value": "3.5",
+            "year": "2025"
+          }
+        ],
+        "seriesID": "CUUR0000SA0"
+      }
+    ]
+  },
+  "message": [],
+  "responseTime": 1,
+  "status": "REQUEST_SUCCEEDED"
+}

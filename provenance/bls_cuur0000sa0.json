@@ -1,0 +1,8 @@
+{
+  "source": "U.S. Bureau of Labor Statistics Public Data API v1",
+  "series_id": "CUUR0000SA0",
+  "source_url": "https://api.bls.gov/publicAPI/v1/timeseries/data/CUUR0000SA0",
+  "observation": "2025 M12 = 3.5",
+  "note": "Generated fixture for CPI series. Review before merging.",
+  "sha256": "PLACEHOLDER_SHA256"
+}
