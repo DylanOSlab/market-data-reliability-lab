@@ -1,0 +1,48 @@
+name: Tool-driven project autopilot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 */12 * * *"
+
+concurrency:
+  group: tool-driven-project-autopilot
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  maintain:
+    name: Run deterministic repository improvements
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      ALLOWED_REPO: DylanOSlab/market-data-reliability-lab
+      DEFAULT_BRANCH: main
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Configure Git identity
+        shell: bash
+        run: |
+          git config user.name "tool-driven-autopilot[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run tool-driven autopilot
+        shell: bash
+        run: python agent/tool_driven_autopilot.py
