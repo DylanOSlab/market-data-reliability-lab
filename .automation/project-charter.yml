@@ -1,0 +1,62 @@
+project:
+  name: Market Data Reliability Lab
+  mission: >
+    Build a reproducible reliability benchmark for public economic and market-data
+    pipelines using official data, deterministic fault injection, golden outputs,
+    provenance records, automated tests, and GitHub Actions.
+
+release:
+  target: v0.3.0
+  completion_requires:
+    - All roadmap tasks are complete
+    - The full test suite passes
+    - Documentation matches implemented behavior
+    - A GitHub release is created
+
+priorities:
+  - completed_features
+  - correctness
+  - reproducibility
+  - regression_test_coverage
+  - maintainability
+
+goals:
+  - id: expand-official-sources
+    description: Add at least one additional official economic-data source benchmark
+    acceptance:
+      - immutable official raw fixture
+      - provenance record
+      - canonical golden output
+      - deterministic fault cases
+      - regression tests
+      - documentation
+  - id: strengthen-failure-coverage
+    description: Add deterministic failure cases for schema, missing values, duplicates, and invalid periods
+    acceptance:
+      - each new failure mode has a regression test
+      - generated cases are reproducible
+  - id: release-v0.3.0
+    description: Prepare and publish release v0.3.0 after all release criteria pass
+
+autonomy:
+  create_issues: true
+  create_branches: true
+  create_pull_requests: true
+  repair_failed_tests: true
+  auto_merge: false
+  create_releases: false
+  maximum_repair_attempts: 2
+  maximum_files_per_change: 12
+  maximum_changed_lines: 1200
+  maximum_tasks_per_run: 1
+
+protected:
+  paths:
+    - .github/
+    - .git/
+    - .env
+  never_modify:
+    - repository permissions
+    - secrets
+    - branch protection
+    - billing
