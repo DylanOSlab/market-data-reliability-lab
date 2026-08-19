@@ -30,12 +30,12 @@ def fetch() -> bytes:
 
 def validate_envelope(payload: object) -> dict:
     if not isinstance(payload, dict):
-        raise ValueError("BLS response root must be an object")
+        raise TypeError("BLS response root must be an object")
     if payload.get("status") != "REQUEST_SUCCEEDED":
         raise ValueError(f"BLS request failed: {payload.get('message')}")
     results = payload.get("Results")
     if not isinstance(results, dict):
-        raise ValueError("Missing Results object")
+        raise TypeError("Missing Results object")
     series = results.get("series")
     if not isinstance(series, list) or len(series) != 1:
         raise ValueError("Expected exactly one BLS series")
@@ -63,7 +63,7 @@ def normalized_csv(payload: dict) -> str:
 
 
 def test_source() -> str:
-    return '''from pathlib import Path
+    return """from pathlib import Path
 
 from mdrlab.core import load, normalize, to_csv
 
@@ -82,7 +82,7 @@ def test_cpi_series_identity() -> None:
     rows = normalize(load(ROOT / "fixtures/raw/bls_cuur0000sa0.json"))
     assert rows
     assert {row["series_id"] for row in rows} == {"CUUR0000SA0"}
-'''
+"""
 
 
 def main() -> None:
