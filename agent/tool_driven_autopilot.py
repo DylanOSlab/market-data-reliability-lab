@@ -46,18 +46,14 @@ def run(*args: str, check: bool = True, timeout: int = 600) -> subprocess.Comple
     if result.stdout:
         print(result.stdout, flush=True)
     if check and result.returncode != 0:
-        raise RuntimeError(
-            f"Command failed with exit code {result.returncode}: {' '.join(args)}"
-        )
+        raise RuntimeError(f"Command failed with exit code {result.returncode}: {' '.join(args)}")
     return result
 
 
 def ensure_repository_scope() -> None:
     actual = os.getenv("GITHUB_REPOSITORY", "")
     if actual != ALLOWED_REPO:
-        raise SystemExit(
-            f"Repository blocked: received {actual!r}, expected {ALLOWED_REPO!r}."
-        )
+        raise SystemExit(f"Repository blocked: received {actual!r}, expected {ALLOWED_REPO!r}.")
 
 
 def ensure_label(name: str, color: str) -> None:
@@ -147,14 +143,18 @@ def validate_after_change() -> bool:
 
 def apply_known_safe_ruff_repairs() -> None:
     replacements = {
-        "agent/local_models_agent.py": ((
-            'raise ValueError("Line numbers must be integers.")',
-            'raise TypeError("Line numbers must be integers.")',
-        ),),
-        "agent/nvidia_pr_supervisor.py": ((
-            'raise ValueError("NVIDIA result must be an object")',
-            'raise TypeError("NVIDIA result must be an object")',
-        ),),
+        "agent/local_models_agent.py": (
+            (
+                'raise ValueError("Line numbers must be integers.")',
+                'raise TypeError("Line numbers must be integers.")',
+            ),
+        ),
+        "agent/nvidia_pr_supervisor.py": (
+            (
+                'raise ValueError("NVIDIA result must be an object")',
+                'raise TypeError("NVIDIA result must be an object")',
+            ),
+        ),
         "agent/nvidia_project_builder.py": (
             (
                 'raise ValueError("NVIDIA response root must be an object")',
@@ -299,7 +299,7 @@ def issue_number_by_title(title: str) -> str:
         "--json",
         "number,title",
         "--jq",
-        f'.[] | select(.title == {json.dumps(title)}) | .number',
+        f".[] | select(.title == {json.dumps(title)}) | .number",
         check=False,
     )
     return result.stdout.splitlines()[0].strip() if result.stdout.strip() else ""
@@ -346,9 +346,7 @@ def publish_change(change: dict[str, object]) -> None:
     body = (
         "## Summary\n\n"
         f"{change['description']}.\n\n"
-        "## Files\n\n"
-        + "\n".join(f"- `{path}`" for path in paths)
-        + "\n\n## Validation\n\n"
+        "## Files\n\n" + "\n".join(f"- `{path}`" for path in paths) + "\n\n## Validation\n\n"
         "- Baseline pytest passed before the change.\n"
         "- Ruff and pytest passed after the change.\n"
         "- Changed paths and diff size were checked by policy.\n\n"

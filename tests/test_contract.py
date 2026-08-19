@@ -5,20 +5,13 @@ import pytest
 from mdrlab.core import load, normalize, to_csv
 from mdrlab.errors import DataContractError
 
-
 ROOT = Path(__file__).parents[1]
 
 
 def test_raw_matches_golden() -> None:
-    actual = to_csv(
-        normalize(
-            load(ROOT / "fixtures/raw/bls_lns11300000.json")
-        )
-    )
+    actual = to_csv(normalize(load(ROOT / "fixtures/raw/bls_lns11300000.json")))
 
-    expected = (
-        ROOT / "fixtures/golden/bls_lns11300000.csv"
-    ).read_text(encoding="utf-8")
+    expected = (ROOT / "fixtures/golden/bls_lns11300000.csv").read_text(encoding="utf-8")
 
     assert actual == expected
 
@@ -40,13 +33,9 @@ def test_corruption_is_rejected(name: str) -> None:
 
 
 def test_order_is_canonicalized() -> None:
-    reversed_rows = normalize(
-        load(ROOT / "fixtures/cases/reverse_order.json")
-    )
+    reversed_rows = normalize(load(ROOT / "fixtures/cases/reverse_order.json"))
 
-    expected_rows = normalize(
-        load(ROOT / "fixtures/raw/bls_lns11300000.json")
-    )
+    expected_rows = normalize(load(ROOT / "fixtures/raw/bls_lns11300000.json"))
 
     assert reversed_rows == expected_rows
 
