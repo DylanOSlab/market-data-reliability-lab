@@ -181,8 +181,48 @@ def run_model(prompt, seed_offset=0):
     return stdout.strip()
 
 
+def repair_common_json_errors(output):
+    """Repair common JSON mistakes made by very small local models."""
+
+    starts = [index for index, char in enumerate(output) if char == "{"]
+
+    for start in reversed(starts):
+        depth = 0
+        in_string = False
+        escaped = False
+
+        for index in range(start, len(output)):
+            char = output[index]
+
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = output[start:index + 1]
+                    candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
+
+                    try:
+                        return json.loads(candidate, strict=False)
+                    except json.JSONDecodeError:
+                        break
+
+    return None
+
+
 def extract_last_json(output):
-    decoder = json.JSONDecoder()
+    decoder = json.JSONDecoder(strict=False)
     objects = []
     for index, char in enumerate(output):
         if char != "{":
@@ -193,8 +233,17 @@ def extract_last_json(output):
                 objects.append(value)
         except json.JSONDecodeError:
             pass
+
     if not objects:
-        raise ValueError("No JSON object found in model output.")
+        repaired = repair_common_json_errors(output)
+        if repaired is not None:
+            objects.append(repaired)
+
+    if not objects:
+        raise ValueError(
+            "No JSON object found in model output, even after repairing "
+            "literal newlines and trailing commas."
+        )
     return objects[-1]
 
 
