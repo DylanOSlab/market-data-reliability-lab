@@ -1,21 +1,23 @@
-name: NVIDIA autonomous project builder
+name: NVIDIA PR supervisor
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "7,22,37,52 * * * *"
 
 concurrency:
-  group: nvidia-autonomous-project-builder
+  group: nvidia-pr-supervisor
   cancel-in-progress: false
 
 permissions:
+  actions: read
+  checks: read
   contents: write
-  issues: write
   pull-requests: write
+  issues: write
 
 jobs:
-  build:
+  supervise:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -23,7 +25,7 @@ jobs:
       NVIDIA_MODEL: ${{ vars.NVIDIA_MODEL || 'openai/gpt-oss-120b' }}
       ALLOWED_REPO: DylanOSlab/market-data-reliability-lab
       GH_TOKEN: ${{ github.token }}
-      MAX_REPAIR_ATTEMPTS: "2"
+      MAX_REMOTE_REPAIR_ATTEMPTS: "2"
       MAX_FILES_PER_CHANGE: "12"
       MAX_CHANGED_LINES: "1200"
       AUTO_MERGE: "false"
@@ -41,10 +43,5 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Configure Git identity
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Run NVIDIA project builder
-        run: python agent/nvidia_project_builder.py
+      - name: Run CI monitor and independent reviewer
+        run: python agent/nvidia_pr_supervisor.py
