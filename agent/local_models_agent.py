@@ -1,9 +1,11 @@
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -11,17 +13,11 @@ ALLOWED_REPO = os.getenv(
     "ALLOWED_REPO",
     "DylanOSlab/market-data-reliability-lab",
 )
-
-DEFAULT_BRANCH = os.getenv(
-    "DEFAULT_BRANCH",
-    "main",
-)
-
+DEFAULT_BRANCH = os.getenv("DEFAULT_BRANCH", "main")
 LLAMA_CLI = os.getenv(
     "LLAMA_CLI",
     "./llama.cpp/build/bin/llama-cli",
 )
-
 MODEL_SPEC = os.getenv(
     "MODEL_SPEC",
     "Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF:Q4_K_M",
@@ -29,108 +25,61 @@ MODEL_SPEC = os.getenv(
 
 MAX_CONTEXT_CHARACTERS = 6_000
 MAX_CONTEXT_FILES = 12
-MAX_CHANGED_FILES = 1
-MAX_GENERATED_LINES_PER_FILE = 200
-MAX_TOTAL_GENERATED_CHARACTERS = 10_000
-MAX_GENERATED_TOKENS = 600
+MAX_SEARCH_CHARACTERS = 2_500
+MAX_REPLACE_CHARACTERS = 4_000
+MAX_GENERATED_TOKENS = 500
 MODEL_CONTEXT_SIZE = 4_096
-MODEL_TIMEOUT_SECONDS = 1_200
+MODEL_TIMEOUT_SECONDS = 600
 HEARTBEAT_SECONDS = 30
 
 BINARY_SUFFIXES = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".webp",
-    ".ico",
-    ".pdf",
-    ".zip",
-    ".gz",
-    ".tar",
-    ".7z",
-    ".exe",
-    ".dll",
-    ".so",
-    ".bin",
-    ".pyc",
-    ".pyd",
-    ".woff",
-    ".woff2",
-    ".ttf",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf",
+    ".zip", ".gz", ".tar", ".7z", ".exe", ".dll", ".so", ".bin",
+    ".pyc", ".pyd", ".woff", ".woff2", ".ttf",
 }
-
-BLOCKED_PATH_PREFIXES = (
-    ".github/",
-    ".git/",
-    ".automation/",
-    ".env",
-)
-
+BLOCKED_PATH_PREFIXES = (".github/", ".git/", ".automation/", ".env")
 BLOCKED_FILE_NAMES = {
-    "package-lock.json",
-    "poetry.lock",
-    "uv.lock",
-    "Pipfile.lock",
+    "package-lock.json", "poetry.lock", "uv.lock", "Pipfile.lock",
 }
-
 PRIORITY_PATH_PREFIXES = (
-    "src/",
-    "tests/",
-    "scripts/",
-    "fixtures/",
-    "provenance/",
+    "src/", "tests/", "scripts/", "fixtures/", "provenance/",
 )
 
 SYSTEM_PROMPT = """
 You are an autonomous software maintenance agent for one public experimental repository.
+Choose exactly one small, useful, low-risk change supported by the supplied repository text.
+Prefer a focused regression test, a small confirmed defect fix, input validation, error
+handling, fixture/provenance validation, or a documentation correction.
 
-Choose exactly one small, useful, low-risk change that advances the project.
-Prefer a missing regression test, deterministic test coverage, a small confirmed defect,
-input validation, error handling, fixture or provenance validation, or a documentation correction.
+Return ONLY a JSON object with exactly four keys: summary, path, search, replace.
+- summary: a short factual description of the change.
+- path: the exact relative path of ONE existing text file shown in the snapshot.
+- search: an exact non-empty substring copied verbatim from that file.
+- replace: the complete replacement text for that substring.
 
-Return only one valid JSON object with this exact structure:
-{
-  "summary": "short explanation",
-  "branch": "ai/short-lowercase-slug",
-  "commit_message": "short commit message",
-  "pr_title": "pull request title",
-  "pr_body": "pull request body",
-  "files": [
-    {
-      "path": "relative/path",
-      "content": "complete replacement content"
-    }
-  ]
-}
-
-Rules:
-- Change exactly one text file.
-- Return complete replacement content, not a diff.
-- Keep the generated file below 200 lines.
-- Never modify .github, .git, .automation, environment files, secrets, tokens,
+Mandatory rules:
+- Modify exactly one existing file.
+- The search text must occur exactly once in the selected file.
+- Keep search below 2500 characters and replace below 4000 characters.
+- Make a real code, test, fixture, provenance, or documentation improvement.
+- Do not return branch names, commit messages, pull-request metadata, Markdown fences,
+  explanations outside JSON, placeholders, ellipses, or comments such as TODO.
+- Do not modify .github, .git, .automation, environment files, secrets, tokens,
   permissions, billing, repository settings, workflows, Actions configuration,
-  security policies, dependency lock files, or binary files.
-- Never delete files.
-- Never use an absolute path or parent-directory path.
-- Never claim tests passed.
-- Never invent files, functions, dependencies, APIs, or existing behavior.
-- Prefer modifying an existing file.
-- Keep the change easy to review and revert.
+  security policies, lock files, or binary files.
+- Never claim tests passed. Never invent files, functions, dependencies, APIs, or behavior.
 """.strip()
 
 
-def run_command(*args, check=True):
-    """Run a command and return its standard output."""
-
+def run_command(*args, check=True, timeout=None):
     process = subprocess.run(
         args,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
+        timeout=timeout,
     )
-
     if check and process.returncode != 0:
         raise RuntimeError(
             f"Command failed: {' '.join(args)}\n"
@@ -138,27 +87,30 @@ def run_command(*args, check=True):
             f"Standard output:\n{process.stdout}\n"
             f"Standard error:\n{process.stderr}"
         )
-
     return process.stdout.strip()
 
 
-def is_safe_context_file(path):
-    """Return True when a file is safe to include in model context."""
-
-    if not path.is_file():
+def is_safe_path_text(path_value):
+    if not isinstance(path_value, str):
         return False
-
-    normalized = path.as_posix()
-
+    normalized = path_value.replace("\\", "/").strip()
+    if not normalized or normalized.startswith("/"):
+        return False
+    if re.match(r"^[A-Za-z]:/", normalized):
+        return False
     if any(normalized.startswith(prefix) for prefix in BLOCKED_PATH_PREFIXES):
         return False
-
-    if path.name in BLOCKED_FILE_NAMES:
+    path = Path(normalized)
+    if ".." in path.parts:
         return False
-
-    if path.suffix.lower() in BINARY_SUFFIXES:
+    if path.name in BLOCKED_FILE_NAMES or path.suffix.lower() in BINARY_SUFFIXES:
         return False
+    return True
 
+
+def is_safe_context_file(path):
+    if not path.is_file() or not is_safe_path_text(path.as_posix()):
+        return False
     try:
         return path.stat().st_size <= 16_000
     except OSError:
@@ -166,80 +118,57 @@ def is_safe_context_file(path):
 
 
 def context_sort_key(path):
-    """Prioritize source, tests, fixtures, and project metadata."""
-
     normalized = path.as_posix()
-
     for index, prefix in enumerate(PRIORITY_PATH_PREFIXES):
         if normalized.startswith(prefix):
             return index, normalized
-
     if normalized == "pyproject.toml":
         return 10, normalized
-
     if normalized == "README.md":
         return 11, normalized
-
     if normalized == "INSTALL_NEXT.md":
         return 12, normalized
-
     return 20, normalized
 
 
 def build_repository_context():
-    """Build a bounded repository snapshot for the local model."""
-
     candidates = [
-        path
-        for path in Path(".").rglob("*")
-        if is_safe_context_file(path)
+        path for path in Path(".").rglob("*") if is_safe_context_file(path)
     ]
-
     candidates.sort(key=context_sort_key)
     sections = []
     current_size = 0
+    included_paths = []
 
     for path in candidates[:MAX_CONTEXT_FILES]:
         try:
-            file_content = path.read_text(
-                encoding="utf-8",
-                errors="replace",
-            )
+            file_content = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-
-        section = (
-            f"\n--- FILE: {path.as_posix()} ---\n"
-            f"{file_content}\n"
-        )
-
+        section = f"\n--- FILE: {path.as_posix()} ---\n{file_content}\n"
         remaining = MAX_CONTEXT_CHARACTERS - current_size
-
         if remaining <= 0:
             break
-
         if len(section) > remaining:
             if remaining >= 400:
                 sections.append(section[:remaining])
+                included_paths.append(path.as_posix())
             break
-
         sections.append(section)
+        included_paths.append(path.as_posix())
         current_size += len(section)
 
-    return "".join(sections)
+    return "".join(sections), set(included_paths)
 
 
 def build_model_prompt(repository_context):
-    """Create the ChatML prompt sent to Qwen."""
-
     return (
         "<|im_start|>system\n"
         f"{SYSTEM_PROMPT}\n"
         "<|im_end|>\n"
         "<|im_start|>user\n"
         f"Repository: {ALLOWED_REPO}\n\n"
-        "Use only the repository snapshot below. "
-        "Choose one small task and return only JSON.\n\n"
+        "Select one exact search-and-replace edit from this snapshot. Return JSON only.\n"
         f"{repository_context}\n"
         "<|im_end|>\n"
         "<|im_start|>assistant\n"
@@ -247,38 +176,21 @@ def build_model_prompt(repository_context):
 
 
 def run_local_model(prompt):
-    """Run Qwen through llama.cpp and emit heartbeat logs."""
-
     cli_path = Path(LLAMA_CLI)
-
     if not cli_path.exists():
-        raise FileNotFoundError(
-            f"llama.cpp executable was not found: {LLAMA_CLI}"
-        )
+        raise FileNotFoundError(f"llama.cpp executable was not found: {LLAMA_CLI}")
 
-    thread_count = min(
-        4,
-        max(1, os.cpu_count() or 1),
-    )
-
+    thread_count = min(4, max(1, os.cpu_count() or 1))
     command = [
         str(cli_path),
-        "-hf",
-        MODEL_SPEC,
-        "-p",
-        prompt,
-        "-n",
-        str(MAX_GENERATED_TOKENS),
-        "-c",
-        str(MODEL_CONTEXT_SIZE),
-        "-t",
-        str(thread_count),
-        "--temp",
-        "0.1",
-        "--top-p",
-        "0.9",
-        "--repeat-penalty",
-        "1.05",
+        "-hf", MODEL_SPEC,
+        "-p", prompt,
+        "-n", str(MAX_GENERATED_TOKENS),
+        "-c", str(MODEL_CONTEXT_SIZE),
+        "-t", str(thread_count),
+        "--temp", "0.1",
+        "--top-p", "0.9",
+        "--repeat-penalty", "1.05",
         "--no-display-prompt",
         "--no-mmap",
         "--simple-io",
@@ -289,11 +201,8 @@ def run_local_model(prompt):
     print(f"Model: {MODEL_SPEC}", flush=True)
     print(f"Prompt size: {len(prompt)} characters", flush=True)
     print(f"Maximum generated tokens: {MAX_GENERATED_TOKENS}", flush=True)
-    print(f"Model context size: {MODEL_CONTEXT_SIZE}", flush=True)
-    print(f"CPU threads: {thread_count}", flush=True)
 
     started_at = time.monotonic()
-
     process = subprocess.Popen(
         command,
         text=True,
@@ -302,343 +211,206 @@ def run_local_model(prompt):
     )
 
     while process.poll() is None:
-        elapsed_seconds = int(time.monotonic() - started_at)
-
-        if elapsed_seconds >= MODEL_TIMEOUT_SECONDS:
+        elapsed = int(time.monotonic() - started_at)
+        if elapsed >= MODEL_TIMEOUT_SECONDS:
             process.kill()
             stdout, stderr = process.communicate()
-
             raise RuntimeError(
                 "Local model exceeded the configured inference timeout.\n"
-                f"Partial output:\n{stdout}\n"
-                f"Errors:\n{stderr}"
+                f"Partial output:\n{stdout}\nErrors:\n{stderr[-4000:]}"
             )
-
-        print(
-            "Local inference is still running: "
-            f"{elapsed_seconds} seconds elapsed.",
-            flush=True,
-        )
-
+        print(f"Local inference is still running: {elapsed} seconds elapsed.", flush=True)
         time.sleep(HEARTBEAT_SECONDS)
 
     stdout, stderr = process.communicate()
-
     if stderr:
-        print(stderr, file=sys.stderr, flush=True)
-
+        print(stderr[-4000:], file=sys.stderr, flush=True)
     if process.returncode != 0:
         raise RuntimeError(
-            "Local model execution failed.\n"
-            f"Exit code: {process.returncode}\n"
-            f"Standard output:\n{stdout}\n"
-            f"Standard error:\n{stderr}"
+            f"Local model failed with exit code {process.returncode}.\n"
+            f"Output:\n{stdout}\nErrors:\n{stderr[-4000:]}"
         )
-
     output = stdout.strip()
-
     if not output:
         raise ValueError("The local model returned an empty response.")
-
-    elapsed_seconds = int(time.monotonic() - started_at)
-
     print(
-        f"Local model completed after {elapsed_seconds} seconds.",
+        f"Local model completed after {int(time.monotonic() - started_at)} seconds.",
         flush=True,
     )
-    print(
-        f"Local model returned {len(output)} characters.",
-        flush=True,
-    )
-
     return output
 
 
 def extract_json_object(model_output):
-    """Extract the first complete JSON object from model output."""
-
     cleaned = re.sub(
-        r"^```(?:json)?\s*",
-        "",
-        model_output.strip(),
-        flags=re.IGNORECASE,
+        r"^```(?:json)?\s*", "", model_output.strip(), flags=re.IGNORECASE
     )
     cleaned = re.sub(r"\s*```$", "", cleaned)
     decoder = json.JSONDecoder()
-
+    parsed_objects = []
     for index, character in enumerate(cleaned):
         if character != "{":
             continue
-
         try:
             parsed, _ = decoder.raw_decode(cleaned[index:])
-
             if isinstance(parsed, dict):
-                return parsed
+                parsed_objects.append(parsed)
         except json.JSONDecodeError:
             continue
-
-    raise ValueError(
-        "The model did not return valid JSON.\n"
-        f"Raw output:\n{model_output}"
-    )
+    if not parsed_objects:
+        raise ValueError(f"The model did not return valid JSON.\nRaw output:\n{model_output}")
+    return parsed_objects[-1]
 
 
-def validate_relative_path(path_value):
-    """Validate a generated repository-relative path."""
-
-    if not isinstance(path_value, str):
-        raise ValueError("Every generated file must have a string path.")
-
-    normalized = path_value.replace("\\", "/").strip()
-
-    if not normalized:
-        raise ValueError("Generated file path cannot be empty.")
-
-    if normalized.startswith("/"):
-        raise ValueError(f"Absolute path blocked: {normalized}")
-
-    if re.match(r"^[A-Za-z]:/", normalized):
-        raise ValueError(f"Windows absolute path blocked: {normalized}")
-
-    if any(normalized.startswith(prefix) for prefix in BLOCKED_PATH_PREFIXES):
-        raise ValueError(f"Protected path blocked: {normalized}")
-
-    path_object = Path(normalized)
-
-    if ".." in path_object.parts:
-        raise ValueError(f"Parent-directory path blocked: {normalized}")
-
-    if path_object.name in BLOCKED_FILE_NAMES:
-        raise ValueError(f"Lock file blocked: {normalized}")
-
-    if path_object.suffix.lower() in BINARY_SUFFIXES:
-        raise ValueError(f"Binary file blocked: {normalized}")
-
-    return normalized
-
-
-def validate_generated_plan(plan):
-    """Validate model output before changing repository files."""
-
-    if not isinstance(plan, dict):
-        raise ValueError("Generated plan must be a JSON object.")
-
-    for field in (
-        "summary",
-        "branch",
-        "commit_message",
-        "pr_title",
-        "pr_body",
-    ):
-        value = plan.get(field)
-
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"Missing or invalid field: {field}")
-
-    branch = plan["branch"].strip()
-
-    if not re.fullmatch(
-        r"ai/[a-z0-9][a-z0-9._-]{2,60}",
-        branch,
-    ):
+def validate_edit(edit, included_paths):
+    if not isinstance(edit, dict):
+        raise ValueError("Generated edit must be a JSON object.")
+    if set(edit) != {"summary", "path", "search", "replace"}:
         raise ValueError(
-            "Generated branch must match ai/<short-lowercase-slug>."
+            "Generated JSON must contain exactly: summary, path, search, replace."
         )
 
-    forbidden_placeholder_values = {
-        "ai/short-lowercase-slug",
-        "short commit message",
-        "pull request title",
-        "pull request body",
-        "short explanation",
+    summary = edit["summary"]
+    path_value = edit["path"]
+    search = edit["search"]
+    replacement = edit["replace"]
+
+    if not isinstance(summary, str) or len(summary.strip()) < 8:
+        raise ValueError("Generated summary is missing or too short.")
+    if not is_safe_path_text(path_value):
+        raise ValueError(f"Generated path is blocked: {path_value!r}")
+
+    normalized_path = path_value.replace("\\", "/").strip()
+    if normalized_path not in included_paths:
+        raise ValueError(
+            f"Generated path was not included in model context: {normalized_path}"
+        )
+
+    if not isinstance(search, str) or not search:
+        raise ValueError("Generated search text must be non-empty.")
+    if not isinstance(replacement, str) or not replacement:
+        raise ValueError("Generated replacement text must be non-empty.")
+    if len(search) > MAX_SEARCH_CHARACTERS:
+        raise ValueError("Generated search text exceeds the size limit.")
+    if len(replacement) > MAX_REPLACE_CHARACTERS:
+        raise ValueError("Generated replacement text exceeds the size limit.")
+    if search == replacement:
+        raise ValueError("Generated search and replacement text are identical.")
+
+    forbidden = {
+        "exact substring copied from the file",
+        "replacement text",
+        "complete replacement content",
+        "complete replacement file content",
+        "relative/path",
     }
+    if search.strip().lower() in forbidden or replacement.strip().lower() in forbidden:
+        raise ValueError("Model returned placeholder search or replacement text.")
+    if "..." in search or "..." in replacement:
+        raise ValueError("Ellipses are not allowed in generated edits.")
 
-    for field in (
-        "summary",
-        "branch",
-        "commit_message",
-        "pr_title",
-        "pr_body",
-    ):
-        if plan[field].strip().lower() in forbidden_placeholder_values:
-            raise ValueError(
-                f"Model returned placeholder content in field: {field}"
+    path = Path(normalized_path)
+    if not path.is_file():
+        raise ValueError(f"Generated target does not exist: {normalized_path}")
+    original = path.read_text(encoding="utf-8", errors="strict")
+    occurrences = original.count(search)
+    if occurrences != 1:
+        raise ValueError(
+            f"Search text must occur exactly once in {normalized_path}; found {occurrences}."
+        )
+
+    edit["path"] = normalized_path
+    return original
+
+
+def make_slug(text):
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:36] or "small-improvement"
+
+
+def run_project_checks():
+    print("Running project checks before creating a pull request.", flush=True)
+    if Path("pyproject.toml").exists():
+        process = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=300,
+        )
+        print(process.stdout, flush=True)
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"Project tests failed with exit code {process.returncode}."
             )
 
-    files = plan.get("files")
 
-    if not isinstance(files, list) or len(files) != MAX_CHANGED_FILES:
-        raise ValueError("The generated plan must modify exactly one file.")
+def apply_edit(edit, original):
+    path = Path(edit["path"])
+    updated = original.replace(edit["search"], edit["replace"], 1)
+    path.write_text(updated, encoding="utf-8")
 
-    total_characters = 0
+    run_project_checks()
 
-    for item in files:
-        if not isinstance(item, dict):
-            raise ValueError("Each files entry must be an object.")
-
-        normalized_path = validate_relative_path(item.get("path"))
-        generated_content = item.get("content")
-
-        if isinstance(generated_content, str) and generated_content.strip().lower() in {
-            "complete replacement content",
-            "complete replacement file content",
-        }:
-            raise ValueError(
-                f"Model returned placeholder file content: {normalized_path}"
-            )
-
-        if not isinstance(generated_content, str) or not generated_content.strip():
-            raise ValueError(
-                f"Generated content is invalid: {normalized_path}"
-            )
-
-        line_count = len(generated_content.splitlines())
-
-        if line_count > MAX_GENERATED_LINES_PER_FILE:
-            raise ValueError(
-                f"Generated file has {line_count} lines: {normalized_path}"
-            )
-
-        total_characters += len(generated_content)
-        item["path"] = normalized_path
-
-    if total_characters > MAX_TOTAL_GENERATED_CHARACTERS:
-        raise ValueError("Generated content exceeds the total size limit.")
-
-
-def ensure_branch_does_not_exist(branch):
-    """Prevent accidentally reusing an existing remote branch."""
-
-    process = subprocess.run(
-        [
-            "git",
-            "ls-remote",
-            "--exit-code",
-            "--heads",
-            "origin",
-            branch,
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-
-    if process.returncode == 0:
-        raise ValueError(f"Generated branch already exists: {branch}")
-
-
-def apply_generated_plan(plan):
-    """Create a branch, commit the generated file, and open a PR."""
-
-    branch = plan["branch"].strip()
-    ensure_branch_does_not_exist(branch)
+    fingerprint = hashlib.sha1(
+        f"{edit['path']}\n{edit['summary']}".encode("utf-8")
+    ).hexdigest()[:7]
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    branch = f"ai/{stamp}-{make_slug(edit['summary'])}-{fingerprint}"
 
     run_command("git", "checkout", "-b", branch)
-
-    changed_paths = []
-
-    for item in plan["files"]:
-        path = Path(item["path"])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(item["content"], encoding="utf-8")
-        changed_paths.append(item["path"])
-
-    run_command("git", "add", "--", *changed_paths)
-
+    run_command("git", "add", "--", edit["path"])
     if not run_command("git", "status", "--porcelain"):
-        raise ValueError("The generated plan produced no repository changes.")
+        raise ValueError("The generated edit produced no repository change.")
+    subprocess.run(["git", "diff", "--cached", "--check"], check=True)
 
-    subprocess.run(
-        ["git", "diff", "--cached", "--check"],
-        check=True,
-    )
+    title = edit["summary"].strip()[:72]
+    commit_message = title[0].lower() + title[1:] if title else "apply small improvement"
+    print(run_command("git", "diff", "--cached", "--stat"), flush=True)
+    run_command("git", "commit", "-m", commit_message)
+    run_command("git", "push", "--set-upstream", "origin", branch)
 
-    print(
-        run_command("git", "diff", "--cached", "--stat"),
-        flush=True,
+    body = (
+        "## Summary\n\n"
+        f"{edit['summary'].strip()}\n\n"
+        "## Validation\n\n"
+        "- Local repository tests completed successfully before this PR was created.\n\n"
+        "Generated by a local Qwen Coder model running inside GitHub Actions.\n"
+        "No external model API or API key was used."
     )
-
-    run_command(
-        "git",
-        "commit",
-        "-m",
-        plan["commit_message"].strip(),
+    url = run_command(
+        "gh", "pr", "create",
+        "--base", DEFAULT_BRANCH,
+        "--head", branch,
+        "--title", title,
+        "--body", body,
     )
-
-    run_command(
-        "git",
-        "push",
-        "--set-upstream",
-        "origin",
-        branch,
-    )
-
-    pull_request_body = (
-        plan["pr_body"].strip()
-        + "\n\nGenerated by a local Qwen Coder model running inside GitHub Actions."
-        + "\n\nNo external model API or API key was used."
-    )
-
-    pull_request_url = run_command(
-        "gh",
-        "pr",
-        "create",
-        "--base",
-        DEFAULT_BRANCH,
-        "--head",
-        branch,
-        "--title",
-        plan["pr_title"].strip(),
-        "--body",
-        pull_request_body,
-    )
-
-    print(
-        f"Pull request created: {pull_request_url}",
-        flush=True,
-    )
+    print(f"Pull request created: {url}", flush=True)
 
 
 def main():
-    """Run one repository-scoped maintenance cycle."""
-
     actual_repository = os.getenv("GITHUB_REPOSITORY", "")
-
     if actual_repository != ALLOWED_REPO:
         raise SystemExit(
-            "Repository scope check failed. "
-            f"Received {actual_repository!r}; "
+            f"Repository scope failed: received {actual_repository!r}, "
             f"expected {ALLOWED_REPO!r}."
         )
 
-    repository_context = build_repository_context()
-
-    if not repository_context.strip():
+    context, included_paths = build_repository_context()
+    if not context.strip():
         raise SystemExit("No eligible repository files were found.")
 
-    print(
-        f"Repository context size: {len(repository_context)} characters",
-        flush=True,
-    )
-
-    prompt = build_model_prompt(repository_context)
-    model_output = run_local_model(prompt)
-
+    print(f"Repository context size: {len(context)} characters", flush=True)
+    output = run_local_model(build_model_prompt(context))
     print("Raw local model output:", flush=True)
-    print(model_output, flush=True)
+    print(output, flush=True)
 
-    plan = extract_json_object(model_output)
-    validate_generated_plan(plan)
+    edit = extract_json_object(output)
+    print("Extracted edit:", flush=True)
+    print(json.dumps(edit, indent=2, ensure_ascii=False), flush=True)
 
-    print("Validated maintenance plan:", flush=True)
-    print(
-        json.dumps(plan, indent=2, ensure_ascii=False),
-        flush=True,
-    )
-
-    apply_generated_plan(plan)
+    original = validate_edit(edit, included_paths)
+    apply_edit(edit, original)
 
 
 if __name__ == "__main__":
