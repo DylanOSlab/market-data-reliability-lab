@@ -145,9 +145,57 @@ def validate_after_change() -> bool:
     return ruff.returncode == 0 and tests.returncode == 0
 
 
+def apply_known_safe_ruff_repairs() -> None:
+    replacements = {
+        "agent/local_models_agent.py": ((
+            'raise ValueError("Line numbers must be integers.")',
+            'raise TypeError("Line numbers must be integers.")',
+        ),),
+        "agent/nvidia_pr_supervisor.py": ((
+            'raise ValueError("NVIDIA result must be an object")',
+            'raise TypeError("NVIDIA result must be an object")',
+        ),),
+        "agent/nvidia_project_builder.py": (
+            (
+                'raise ValueError("NVIDIA response root must be an object")',
+                'raise TypeError("NVIDIA response root must be an object")',
+            ),
+            (
+                'raise ValueError("Invalid file entry")',
+                'raise TypeError("Invalid file entry")',
+            ),
+        ),
+        "scripts/build_cpi_candidate.py": (
+            (
+                'raise ValueError("BLS response root must be an object")',
+                'raise TypeError("BLS response root must be an object")',
+            ),
+            (
+                'raise ValueError("Missing Results object")',
+                'raise TypeError("Missing Results object")',
+            ),
+        ),
+    }
+    for filename, file_replacements in replacements.items():
+        path = Path(filename)
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for old, new in file_replacements:
+            occurrences = text.count(old)
+            if occurrences != 1:
+                raise RuntimeError(
+                    f"Expected exactly one known Ruff pattern in {filename}: "
+                    f"{old!r}; found {occurrences}"
+                )
+            text = text.replace(old, new, 1)
+        path.write_text(text, encoding="utf-8")
+
+
 def strategy_ruff_fix() -> bool:
     before = snapshot()
     run(sys.executable, "-m", "ruff", "check", ".", "--fix", check=False)
+    apply_known_safe_ruff_repairs()
     run(sys.executable, "-m", "ruff", "format", ".", check=False)
     return before != snapshot()
 
