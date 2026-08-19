@@ -282,6 +282,7 @@ def run_local_model(prompt):
         "--no-display-prompt",
         "--no-mmap",
         "--simple-io",
+        "--single-turn",
     ]
 
     print("Starting local Qwen inference.", flush=True)
@@ -445,6 +446,26 @@ def validate_generated_plan(plan):
             "Generated branch must match ai/<short-lowercase-slug>."
         )
 
+    forbidden_placeholder_values = {
+        "ai/short-lowercase-slug",
+        "short commit message",
+        "pull request title",
+        "pull request body",
+        "short explanation",
+    }
+
+    for field in (
+        "summary",
+        "branch",
+        "commit_message",
+        "pr_title",
+        "pr_body",
+    ):
+        if plan[field].strip().lower() in forbidden_placeholder_values:
+            raise ValueError(
+                f"Model returned placeholder content in field: {field}"
+            )
+
     files = plan.get("files")
 
     if not isinstance(files, list) or len(files) != MAX_CHANGED_FILES:
@@ -458,6 +479,14 @@ def validate_generated_plan(plan):
 
         normalized_path = validate_relative_path(item.get("path"))
         generated_content = item.get("content")
+
+        if isinstance(generated_content, str) and generated_content.strip().lower() in {
+            "complete replacement content",
+            "complete replacement file content",
+        }:
+            raise ValueError(
+                f"Model returned placeholder file content: {normalized_path}"
+            )
 
         if not isinstance(generated_content, str) or not generated_content.strip():
             raise ValueError(
