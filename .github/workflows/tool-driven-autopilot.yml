@@ -19,7 +19,6 @@ jobs:
     name: Run deterministic repository improvements
     runs-on: ubuntu-latest
     timeout-minutes: 25
-
     env:
       ALLOWED_REPO: DylanOSlab/market-data-reliability-lab
       DEFAULT_BRANCH: main
@@ -29,6 +28,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Set up Python
@@ -38,11 +38,9 @@ jobs:
           cache: pip
 
       - name: Configure Git identity
-        shell: bash
         run: |
-          git config user.name "tool-driven-autopilot[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Run tool-driven autopilot
-        shell: bash
         run: python agent/tool_driven_autopilot.py
