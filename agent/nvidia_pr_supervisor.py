@@ -36,12 +36,12 @@ def nim(system: str, payload: dict[str, Any], max_tokens: int = 7000) -> dict[st
     with urllib.request.urlopen(request, timeout=240) as response:
         data = json.load(response)
     text = data["choices"][0]["message"]["content"].strip()
-    match = re.search(r"\{.*\}", text, flags=re.S)
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if not match:
         raise ValueError("NVIDIA response did not contain JSON")
     result = json.loads(match.group(0))
     if not isinstance(result, dict):
-        raise ValueError("NVIDIA result must be an object")
+        raise TypeError("NVIDIA result must be an object")
     return result
 
 
