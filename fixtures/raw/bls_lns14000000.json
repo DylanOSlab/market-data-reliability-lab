@@ -1,0 +1,24 @@
+{
+  "Results": {
+    "series": [
+      {
+        "seriesID": "LNS14000000",
+        "data": [
+          {
+            "year": "2025",
+            "period": "M12",
+            "periodName": "December",
+            "latest": "true",
+            "value": "5.0",
+            "footnotes": [
+              {}
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "message": [],
+  "responseTime": 1,
+  "status": "REQUEST_SUCCEEDED"
+}

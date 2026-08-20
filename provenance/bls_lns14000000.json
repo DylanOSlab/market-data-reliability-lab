@@ -1,0 +1,8 @@
+{
+  "source": "U.S. Bureau of Labor Statistics Public Data API v1",
+  "series_id": "LNS14000000",
+  "source_url": "https://api.bls.gov/publicAPI/v1/timeseries/data/LNS14000000",
+  "observation": "2025 M12 = 5.0",
+  "note": "Generated fixture for unemployment series. Review before merging.",
+  "sha256": "PLACEHOLDER_SHA256"
+}
