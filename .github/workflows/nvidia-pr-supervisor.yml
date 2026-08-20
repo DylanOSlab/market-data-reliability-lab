@@ -2,8 +2,13 @@ name: NVIDIA PR supervisor
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows:
+      - ci
+    types:
+      - completed
   schedule:
-    - cron: "7,22,37,52 * * * *"
+    - cron: "11,26,41,56 * * * *"
 
 concurrency:
   group: nvidia-pr-supervisor
@@ -13,8 +18,9 @@ permissions:
   actions: read
   checks: read
   contents: write
-  pull-requests: write
   issues: write
+  pull-requests: write
+  statuses: write
 
 jobs:
   supervise:
@@ -25,13 +31,13 @@ jobs:
       NVIDIA_MODEL: ${{ vars.NVIDIA_MODEL || 'openai/gpt-oss-120b' }}
       ALLOWED_REPO: DylanOSlab/market-data-reliability-lab
       GH_TOKEN: ${{ github.token }}
-      MAX_REMOTE_REPAIR_ATTEMPTS: "2"
-      MAX_FILES_PER_CHANGE: "12"
-      MAX_CHANGED_LINES: "1200"
-      AUTO_MERGE: "false"
+      MAX_REMOTE_REPAIR_ATTEMPTS: "3"
+      MAX_FILES_PER_CHANGE: "24"
+      MAX_CHANGED_LINES: "3000"
+      AUTO_MERGE: "true"
 
     steps:
-      - name: Check out main
+      - name: Check out trusted main
         uses: actions/checkout@v4
         with:
           ref: main
@@ -43,5 +49,5 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Run CI monitor and independent reviewer
+      - name: Run CI monitor, repair, review, and merge
         run: python agent/nvidia_pr_supervisor.py
