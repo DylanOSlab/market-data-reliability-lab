@@ -6,6 +6,12 @@ A small, reproducible benchmark for testing economic and market-data ingestion s
 
 The first dataset is the U.S. Bureau of Labor Statistics (BLS) labor-force participation series `LNS11300000`. The checked-in raw fixture preserves the BLS JSON shape and a documented observation (`2025 M12 = 62.4`). Tests run offline and never depend on the availability of an external API.
 
+## Additional official series
+
+- CPI series `CUUR0000SA0`
+- Unemployment series `LNS14000000`
+- **Newly added series** `LNS13000000` (example series for v0.3.0 expansion)
+
 ## Reliability contract
 
 A conforming pipeline must:
@@ -54,17 +60,8 @@ python scripts/fetch_bls_snapshot.py
 
 Refresh is intentionally separate from CI's deterministic offline tests. The scheduled smoke job checks the upstream contract without silently changing golden files.
 
-## Initial failure catalog
-
-- `duplicate_key.json`: duplicate observation
-- `invalid_period.json`: period `M13`
-- `numeric_as_text_noise.json`: value contains a thousands separator/noise
-- `schema_drift.json`: `Results` renamed to `results`
-- `reverse_order.json`: valid records in descending order, expected to normalize successfully
-
 ## Next increments
 
-- Add CPI (`CUUR0000SA0`) and unemployment (`LNS14000000`).
-- Add FRED/ALFRED vintage tests for revision-aware processing.
-- Add exchange-rate or securities-market sources only after licensing and redistribution checks.
+- Add more official series (e.g., exchange rates, securities market data) after licensing review.
+- Add FRED/ALFRED vintage tests for revision‑aware processing.
 - Publish benchmark results as JUnit and JSON artifacts.
